@@ -49,7 +49,7 @@ brooder = "brooder.cli:principal"
 Homepage = "https://github.com/Justo-Tapiador/ia-so-brooder"
 Issues = "https://github.com/Justo-Tapiador/ia-so-brooder/issues"
 Repository = "https://github.com/Justo-Tapiador/ia-so-brooder"
-Contact = "mailto:justo.tapiador@gmail.com"
+Contact = "https://github.com/Justo-Tapiado"
 
 [tool.setuptools.packages.find]
 include = ["brooder*"]
