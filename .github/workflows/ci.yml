@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Instalar
+        run: pip install -e ".[dev]"
+      - name: Tests
+        run: pytest -q
+
+  humo:
+    # El pipeline completo en miniatura: incubar un poco, exportar
+    # el SSD y arrancar la IA-SO. Demuestra en cada push que el ciclo
+    # incubadora -> SSD -> PC de nacimiento funciona de extremo a extremo.
+    name: Humo (incubar -> exportar -> arrancar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar
+        run: pip install -e .
+      - name: Incubación de humo (6000 pasos)
+        run: |
+          mkdir -p entrenamiento_ci
+          brooder incubar --pasos 6000 --salida entrenamiento_ci
+      - name: Exportar imagen SSD
+        run: brooder exportar --desde entrenamiento_ci/mejor.pt --salida ssd_ci/brooder.img
+      - name: Arrancar la IA-SO (demo no interactiva)
+        env:
+          NO_COLOR: "1"
+        run: |
+          # con un cerebro apenas incubado no resolverá todo:
+          # lo importante es que el ciclo completo arranca sin errores
+          brooder demo --ssd ssd_ci/brooder.img || test $? -eq 1
+
+  entrenamiento-completo:
+    # Manual: incubación completa con verificación de dominio.
+    name: Incubación completa (manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Instalar
+        run: pip install -e ".[graficas]"
+      - name: Incubar (hasta converger)
+        run: brooder incubar
+      - name: Diagnóstico (exige dominio completo)
+        run: brooder diagnostico
+      - name: Curva de recompensa
+        run: brooder graficar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: incubacion
+          path: |
+            entrenamiento/mejor.pt
+            entrenamiento/metricas.jsonl
+            img/curva_recompensa.png

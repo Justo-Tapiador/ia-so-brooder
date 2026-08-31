@@ -1,0 +1,4 @@
+# Dependencias de ejecución de IA-SO Brooder
+# (instalación recomendada: pip install -e ".[dev]")
+torch>=2.0
+numpy>=1.24

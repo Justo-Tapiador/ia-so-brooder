@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ia-so-brooder"
+version = "0.1.0"
+description = "Un sistema operativo gobernado por una red neuronal que se incuba, se exporta en un SSD y nace en otro ordenador."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Justo Tapiador García", email = "justo.tapiador@gmail.com" },
+]
+maintainers = [
+    { name = "Justo Tapiador García", email = "justo.tapiador@gmail.com" },
+]
+requires-python = ">=3.9"
+keywords = [
+    "sistema-operativo", "reinforcement-learning", "ppo", "pytorch",
+    "ia", "artificial-intelligence", "experimento",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Education",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Operating System",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+graficas = ["matplotlib>=3.7"]
+
+[project.scripts]
+brooder = "brooder.cli:principal"
+
+[project.urls]
+Homepage = "https://github.com/Justo-Tapiador/ia-so-brooder"
+Issues = "https://github.com/Justo-Tapiador/ia-so-brooder/issues"
+Repository = "https://github.com/Justo-Tapiador/ia-so-brooder"
+Contact = "mailto:justo.tapiador@gmail.com"
+
+[tool.setuptools.packages.find]
+include = ["brooder*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

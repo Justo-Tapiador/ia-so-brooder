@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+
+# Entrenamiento (los artefactos pesados no se versionan;
+# la imagen ssd/brooder.img y img/curva_recompensa.png SÍ se versionan)
+entrenamiento/*.pt
+
+# Sandboxes locales
+brooder_sandbox/
+brooder_sandbox_demo/
+
+# Sistema
+.DS_Store
+
+# No es distribución npm
+package.json
