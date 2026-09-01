@@ -254,7 +254,11 @@ class CerebroBrooder(nn.Module):
 
     @staticmethod
     def cargar(ruta, dispositivo=None) -> "CerebroBrooder":
-        paquete = torch.load(ruta, map_location=dispositivo, weights_only=False)
+        # weights_only=True: un .pt es un pickle; cargarlo sin más
+        # ejecutaría cualquier código embebido. Aquí solo deben vivir
+        # config (ints) y pesos (tensores), así que el modo restringido
+        # de torch es suficiente — y si no lo fuera, mejor que falle.
+        paquete = torch.load(ruta, map_location=dispositivo, weights_only=True)
         cerebro = CerebroBrooder(**paquete["config"])
         cerebro.load_state_dict(paquete["estado"])
         cerebro.eval()

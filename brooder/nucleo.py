@@ -227,8 +227,14 @@ def montar_ssd(ruta_ssd: str | Path):
         if "brooder.pt" not in nombres:
             raise ValueError("La imagen SSD no contiene brooder.pt")
         with imagen.open("brooder.pt") as f:
+            # weights_only=True: la imagen SSD viaja por redes y discos
+            # no confiables. Un .pt es un pickle: cargado sin
+            # restricciones ejecutaría cualquier código embebido en el
+            # PC de nacimiento. En modo restringido solo se aceptan
+            # tensores y tipos básicos; una imagen manipulada puede,
+            # como mucho, fallar al cargar.
             paquete = torch.load(
-                io.BytesIO(f.read()), map_location="cpu", weights_only=False
+                io.BytesIO(f.read()), map_location="cpu", weights_only=True
             )
         cerebro = CerebroBrooder(**paquete["config"])
         cerebro.load_state_dict(paquete["estado"])
@@ -263,7 +269,16 @@ def exportar_ssd(
     ruta_salida = Path(ruta_salida)
     ruta_salida.parent.mkdir(parents=True, exist_ok=True)
 
-    paquete = torch.load(ruta_modelo, map_location="cpu", weights_only=False)
+    # weights_only=True también al leer: la misma política de carga en
+    # todos los puntos de entrada deja un único patrón que auditar.
+    paquete = torch.load(ruta_modelo, map_location="cpu", weights_only=True)
+    # La imagen SSD solo empaqueta lo que el PC de nacimiento necesita:
+    # config y pesos. El estado del optimizador NO viaja (imagen más
+    # ligera y sin datos de entrenamiento innecesarios en el "SSD").
+    pesos = {
+        "config": paquete["config"],
+        "estado": paquete["estado"],
+    }
     manifiesto = {
         "proyecto": "IA-SO Brooder",
         "descripcion": (
@@ -281,7 +296,7 @@ def exportar_ssd(
     with ZipFile(temporal, "w", compression=ZIP_DEFLATED) as imagen:
         imagen.writestr(
             "brooder.pt",
-            _torch_a_bytes(paquete),
+            _torch_a_bytes(pesos),
         )
         imagen.writestr(
             "manifiesto.json",

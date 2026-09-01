@@ -60,7 +60,7 @@ entienda todas las instrucciones de una CPU moderna».
 ┌─────────────────┐     ┌───────────┐      ┌────────────────────────┐
 │  máquina potente│     │  brooder  │      │  CPU + GPU             │
 │                 │     │  .img     │      │                        │
-│  PPO + currículo│────►│ (783 KiB) │─────►│  BIOS → núcleo → IA-SO │
+│  PPO + currículo│────►│ (262 KiB) │─────►│  BIOS → núcleo → IA-SO │
 │  ~14 min en CPU │     └───────────┘      │                        │
 └─────────────────┘    exportar / montar   │  ECO · SUMA · GUARDAR  │
      entrenar                             │  RECORDAR · AVISO      │
@@ -125,7 +125,7 @@ ls brooder_sandbox/disco/    # 0.tok ... 9.tok: la ranura 4 contiene 'G'
 ```
 
 > El repositorio incluye la imagen SSD ya incubada (`ssd/brooder.img`,
-> 783 KiB): puedes arrancar la IA-SO sin entrenar nada.
+> 262 KiB): puedes arrancar la IA-SO sin entrenar nada.
 
 ---
 
@@ -138,7 +138,7 @@ configuraciones de sobremesa recomendamos.
 
 ### Qué es exactamente `brooder.img`
 
-`ssd/brooder.img` (783 KiB) empaqueta el cerebro entrenado, su estado
+`ssd/brooder.img` (262 KiB) empaqueta el cerebro entrenado, su estado
 persistido y un manifiesto con las métricas de incubación. En la
 versión actual **no es una imagen arrancable a nivel de BIOS**: el
 «cargador de arranque» de la IA-SO es el núcleo de Brooder
@@ -148,7 +148,7 @@ el arranque directo (BIOS → cerebro, sin SO anfitrión) figura en la hoja
 de ruta.
 
 Consecuencia práctica: **sirve cualquier SSD y cualquier formato** que
-el PC pueda leer. La velocidad es irrelevante — 783 KiB se leen en un
+el PC pueda leer. La velocidad es irrelevante — 262 KiB se leen en un
 instante incluso por SATA —: elige por factor de forma y comodidad, no
 por benchmark.
 
@@ -295,6 +295,29 @@ Consecuencias de seguridad:
 - **Red desactivada** por política en v1.
 - **Recovery independiente**: si el cerebro falla, el núcleo sigue vivo
   y ofrece `:recovery` (reiniciar IA, estado, diagnóstico, apagar).
+
+### Integridad del cerebro distribuido
+
+`ssd/brooder.img` viaja por la red cada vez que alguien clona este
+repositorio. Como un archivo `.pt` es un pickle de Python, montar una
+imagen manipulada podría, en principio, ejecutar código en el arranque.
+Brooder impone la política contraria: todos los `torch.load` del código
+se ejecutan con `weights_only=True` (solo tensores y tipos básicos), y
+`brooder exportar` empaqueta en la imagen **únicamente** `config` +
+pesos — el estado del optimizador nunca viaja. Una imagen manipulada,
+como mucho, no carga; no puede ejecutar. Hay tests de regresión en
+`tests/test_seguridad.py` y la política completa está en
+[SECURITY.md](SECURITY.md).
+
+Verifica la imagen antes de arrancarla:
+
+```bash
+sha256sum ssd/brooder.img
+# 1def9990587f935d2dbc019ee4797610725d81bfff66063cd12d21c6509dd62b  brooder.img
+```
+
+*(Actualiza ese hash si regeneras la imagen con `brooder exportar`;
+cada release de GitHub publica también el hash de la imagen adjunta.)*
 
 ---
 

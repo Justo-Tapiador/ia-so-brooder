@@ -61,7 +61,7 @@ instruction of a modern CPU".
 ┌─────────────────┐        ┌───────────┐       ┌────────────────────────┐
 │  powerful       │        │  brooder  │       │  CPU + GPU             │
 │  machine        │        │  .img     │       │                        │
-│  PPO +          │───────►│ (783 KiB) │──────►│  BIOS → kernel → AI-OS │
+│  PPO +          │───────►│ (262 KiB) │──────►│  BIOS → kernel → AI-OS │
 │  curriculum     │        └───────────┘       │                        │
 │  ~14 min on CPU │      export / mount        │  ECO · SUMA · GUARDAR  │
 └─────────────────┘                           │  RECORDAR · AVISO      │
@@ -126,7 +126,7 @@ ls brooder_sandbox/disco/    # 0.tok ... 9.tok: slot 4 contains 'G'
 ```
 
 > The repository ships the already-incubated SSD image
-> (`ssd/brooder.img`, 783 KiB): you can boot the AI-OS without training
+> (`ssd/brooder.img`, 262 KiB): you can boot the AI-OS without training
 > anything.
 
 ---
@@ -140,7 +140,7 @@ configurations we recommend.
 
 ### What exactly `brooder.img` is
 
-`ssd/brooder.img` (783 KiB) packages the trained brain, its persisted
+`ssd/brooder.img` (262 KiB) packages the trained brain, its persisted
 state and a manifest with the incubation metrics. In the current version
 **it is not a BIOS-level bootable image**: the AI-OS "bootloader" is the
 Brooder kernel itself (`brooder arrancar`), which runs on top of the
@@ -149,7 +149,7 @@ the brain's home; raw booting (BIOS → brain, with no host OS) is on the
 roadmap.
 
 Practical consequence: **any SSD and any disk format work**, as long as
-the PC can read it. Speed is irrelevant — 783 KiB are read in an instant
+the PC can read it. Speed is irrelevant — 262 KiB are read in an instant
 even over SATA —: choose by form factor and convenience, not by
 benchmark.
 
@@ -295,6 +295,30 @@ Security consequences:
 - **Network disabled** by policy in v1.
 - **Independent recovery**: if the brain fails, the kernel stays alive
   and offers `:recovery` (restart AI, state, diagnostics, shutdown).
+
+### Integrity of the shipped brain
+
+`ssd/brooder.img` travels through the network every time someone clones
+this repository. Since a `.pt` file is a Python pickle, mounting a
+tampered image could otherwise execute code at boot. Brooder enforces
+the opposite policy: every `torch.load` in the codebase runs with
+`weights_only=True` (tensors and basic types only), and `brooder
+exportar` packages **only** `config` + weights into the image — the
+optimizer state never travels. A manipulated image can at most fail to
+load; it cannot execute. This is regression-tested in
+`tests/test_seguridad.py`, and the full policy lives in
+[SECURITY.md](SECURITY.md).
+
+Verify the shipped image before booting it:
+
+```bash
+sha256sum ssd/brooder.img
+# 1def9990587f935d2dbc019ee4797610725d81bfff66063cd12d21c6509dd62b  brooder.img
+```
+
+*(Update that digest if you regenerate the image with `brooder
+exportar`; each GitHub release also publishes the digest of its
+attached image.)*
 
 ---
 

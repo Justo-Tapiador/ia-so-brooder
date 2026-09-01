@@ -428,7 +428,12 @@ class Incubadora:
         Devuelve el paso global guardado. Permite incubar en varias
         sesiones: 'brooder incubar' + 'brooder incubar --reanudar'.
         """
-        paquete = torch.load(ruta, map_location=self.dispositivo, weights_only=False)
+        # weights_only=True: los checkpoints propios solo contienen
+        # config, pesos y el estado de Adam (tensores y escalares);
+        # el modo restringido los carga sin permitir código arbitrario.
+        paquete = torch.load(
+            ruta, map_location=self.dispositivo, weights_only=True
+        )
         self.cerebro.load_state_dict(paquete["estado"])
         if "optimizador" in paquete:  # checkpoints antiguos: sin estado de Adam
             self.optimizador.load_state_dict(paquete["optimizador"])
