@@ -213,8 +213,8 @@ def cmd_arrancar(args) -> int:
             print(
                 pantalla.amarillo(
                     "No entendí la solicitud. Prueba 'HOLA', '3+5', "
-                    "'guardar 4 G', 'recordar 2 Z', 'aviso A', 'montar' "
-                    "o :ayuda."
+                    "'guardar 4 G', 'recordar 2 Z', 'aviso A', 'montar', "
+                    "'escribir 3 P', 'leer 3 P' o :ayuda."
                 )
             )
             continue
@@ -238,17 +238,24 @@ def _toggle_pendrive(nucleo) -> None:
     if instante.dispositivo_conectado:
         limpia = maquina.desconectar_dispositivo()
         if limpia:
-            print("Conector USB: pendrive desconectado (estaba desmontado).")
+            print(
+                "Conector USB: pendrive desconectado (estaba desmontado; "
+                "sus datos viajan con él)."
+            )
         else:
             print(
                 pantalla.rojo(
                     "Conector USB: pendrive retirado MONTADO -> "
-                    "extraccion insegura registrada por el kernel."
+                    "extraccion insegura registrada por el kernel; "
+                    "LOS DATOS DEL PENDRIVE SE PIERDEN."
                 )
             )
     else:
         maquina.conectar_dispositivo()
-        print("Conector USB: pendrive conectado. Pide 'montar' a la IA.")
+        print(
+            "Conector USB: pendrive conectado. Pide 'montar' a la IA "
+            "(y luego 'escribir 3 P' / 'leer 3 P')."
+        )
 
 
 def _bucle_recovery(nucleo, args) -> bool:
@@ -414,18 +421,28 @@ def cmd_demo(args) -> int:
             f"  El disco de Brooder persiste en: "
             f"{Path(args.sandbox) / 'disco'} (revísalo: son archivos reales)"
         )
+        print(
+            f"  El pendrive persiste en: "
+            f"{Path(args.sandbox) / 'pendrive.json'} (ranuras reales, "
+            "sobreviven a apagar y encender)"
+        )
     return 0 if exitos == total and disp_ok else 1
 
 
 def _demo_pendrive(nucleo, cerebro) -> bool:
-    """Sección Fase 1 de la demo: el pendrive virtual (hot-plug USB).
+    """Secciones Fase 1 y 1.5 de la demo: el pendrive virtual.
 
-    El mundo exterior enchufa un pendrive; el cerebro percibe la
-    presencia en sus canales y decide montarlo. Después se pide una
-    "extracción segura" y decide desmontarlo. Por último, una
-    extracción FORZADA con el pendrive montado muestra la protección
-    del kernel: "extraccion insegura" queda registrada como ERROR
-    aunque la IA no haya reaccionado.
+    Fase 1 — el mundo exterior enchufa un pendrive; el cerebro
+    percibe la presencia en sus canales y decide montarlo. Después
+    se pide una "extracción segura" y decide desmontarlo. Por último,
+    una extracción FORZADA con el pendrive montado muestra la
+    protección del kernel: "extraccion insegura" queda registrada
+    como ERROR aunque la IA no haya reaccionado.
+
+    Fase 1.5 — almacenamiento real: escribir un dato en el pendrive
+    montado, retirarlo DESMONTADO (extracción segura), reenchufarlo y
+    leer el dato: EL PENDRIVE RECUERDA. El trazado I/O propio del
+    dispositivo cierra la escena.
 
     Devuelve True si el cerebro administró el dispositivo con éxito
     (los cerebros del contrato viejo no pueden: la sección muestra
@@ -433,6 +450,7 @@ def _demo_pendrive(nucleo, cerebro) -> bool:
     Fase 0, y no cuenta para el código de salida).
     """
     from brooder import pantalla
+    from brooder.constantes import CARACTER_DE_TOKEN, TOKEN_DE_CARACTER
 
     print()
     print(
@@ -444,8 +462,18 @@ def _demo_pendrive(nucleo, cerebro) -> bool:
         cerebro.dim_entrada < OBS_DIM or cerebro.n_primitivas < N_PRIMITIVAS
     )
 
-    def _atender(modo: str) -> bool:
-        solicitud = Solicitud(Tarea.DISPOSITIVO, datos={"modo": modo})
+    def _atender(modo: str, K=None, V=None) -> bool:
+        datos = {"modo": modo}
+        tokens, esperado = [], []
+        if modo in ("escribir", "leer"):
+            datos["K"], datos["V"] = K, V
+            if modo == "escribir":
+                tokens, esperado = [K, V, K], [V]
+            else:
+                tokens, esperado = [K], [V]
+        solicitud = Solicitud(
+            Tarea.DISPOSITIVO, tokens=tokens, esperado=esperado, datos=datos
+        )
         resultado = nucleo.atender_solicitud(solicitud)
         if resultado.exito:
             print(
@@ -479,6 +507,29 @@ def _demo_pendrive(nucleo, cerebro) -> bool:
         maquina.ejecutar(Primitiva.MONTAR_DISPOSITIVO, 0)
         maquina.avanzar_paso()
         print(f"  {verde_local('[ OK ]')} montado por el núcleo")
+        # vía sintética del almacenamiento: el kernel demuestra el medio
+        maquina.mover_puntero_dispositivo(3)
+        maquina.escribir_teclado([TOKEN_DE_CARACTER["Q"]])
+        maquina.leer_teclado()
+        maquina.escribir_dispositivo(38)
+        maquina.avanzar_paso()
+        print(f"  {verde_local('[ OK ]')} escribir ranura 3 por el núcleo")
+        # extracción SEGURA: desmontar antes de retirar (el dato viaja)
+        maquina.ejecutar(Primitiva.DESMONTAR_DISPOSITIVO, 0)
+        maquina.avanzar_paso()
+        maquina.desconectar_dispositivo()
+        maquina.conectar_dispositivo()
+        maquina.ejecutar(Primitiva.MONTAR_DISPOSITIVO, 0)
+        maquina.mover_puntero_dispositivo(3)
+        ok_sintetico = maquina.leer_dispositivo()
+        maquina.avanzar_paso()
+        valor = maquina.instante().bus_valor
+        print(
+            f"  {verde_local('[ OK ]')} el pendrive recuerda: ranura 3 -> "
+            f"'{CARACTER_DE_TOKEN.get(valor, '?')}'"
+            if ok_sintetico
+            else "  [FALLO] lectura sintética"
+        )
         maquina.ejecutar(Primitiva.DESMONTAR_DISPOSITIVO, 0)
         maquina.avanzar_paso()
         print(f"  {verde_local('[ OK ]')} desmontado por el núcleo")
@@ -512,26 +563,67 @@ def _demo_pendrive(nucleo, cerebro) -> bool:
     print(
         "      "
         + pantalla.rojo(
-            "el kernel registra el ERROR: extraccion insegura"
+            "el kernel registra el ERROR: extraccion insegura "
+            "(y el dato no sincronizado se pierde)"
         )
     )
+
+    # --- Fase 1.5: almacenamiento real — el pendrive recuerda -------
+    print()
+    print(negrita_local("ALMACENAMIENTO REAL: el pendrive recuerda (Fase 1.5)"))
+    print("─" * 66)
+    # 6) la sesión pide montar el medio y luego escribir en él
+    V = TOKEN_DE_CARACTER["Q"]
+    maquina.conectar_dispositivo()
+    print("  [ > ] conector USB: pendrive conectado")
+    print("  [ > ] solicitud: montar (la IA acepta el medio)")
+    ok &= _atender("montar")
+    print("  [ > ] solicitud: escribir 3 Q (sobre el medio ya montado)")
+    ok &= _atender("escribir", K=3, V=V)
+    # 7) extracción segura: desmontar y retirar — el dato VIAJA en el medio
+    ok &= _atender("desmontar")
+    maquina.desconectar_dispositivo()
+    print("  [ > ] el pendrive se retira DESMONTADO (extracción segura)")
+    # 8) el mismo pendrive vuelve: la IA lo vuelve a montar y el dato
+    #    sigue ahí
+    maquina.conectar_dispositivo()
+    print("  [ > ] el mismo pendrive vuelve al conector")
+    ok &= _atender("montar")
+    print("  [ > ] solicitud: leer 3 Q (el valor solo puede venir del medio)")
+    ok &= _atender("leer", K=3, V=V)
+    if ok:
+        print(
+            f"  {verde_local('[ OK ]')} EL PENDRIVE RECUERDA: Q sobrevivió "
+            "al ciclo retirar-volver (las ranuras viven en el medio)"
+        )
+    # 9) trazado I/O propio del dispositivo (anillo del propio pendrive)
+    print()
+    print(pantalla.tenue("  Trazado I/O del dispositivo (anillo propio):"))
+    for linea in maquina.panel_trazado_dispositivo():
+        if linea:
+            print(f"    {linea}")
     print()
     for linea in pantalla.render_panel_registro(maquina.panel_registro()):
         print(linea)
     print()
     print(
         pantalla.tenue(
-            "  Montar/desmontar son decisiones de la política neuronal; el"
+            "  Montar/desmontar y el trazado de la propia I/O son decisiones"
         )
     )
     print(
         pantalla.tenue(
-            "  kernel las valida y anota su ciclo en el registro (dmesg). El"
+            "  de la política; el kernel valida cada primitiva, anota el"
         )
     )
     print(
         pantalla.tenue(
-            "  conector detecta la extracción insegura por sí mismo."
+            "  ciclo de vida en su registro (dmesg) y el pendrive lleva su"
+        )
+    )
+    print(
+        pantalla.tenue(
+            "  propio anillo de I/O. La extracción insegura pierde datos."
         )
     )
     return ok

@@ -253,6 +253,11 @@ def ayuda_interactiva() -> None:
     print("  aviso A        -> mostrará A y pitará al leer la alarma")
     print("  montar         -> montará el pendrive del conector (si lo hay)")
     print("  desmontar      -> liberará el pendrive de forma segura")
+    print("  escribir 3 P   -> guardará P en la ranura 3 del pendrive montado")
+    print("                    y la recuperará en pantalla (el medio recuerda)")
+    print("  leer 3 P       -> leerá la ranura 3 del pendrive montado (P = lo")
+    print("                    que debería estar grabado en el medio)")
+    print(tenue("  El espacio entre número y letra es opcional: 'leer 3P' = 'leer 3 P'."))
     print(tenue("  Comandos: :pendrive (enchufa/retira el USB)  :ayuda  :recovery  :salir"))
     print()
 

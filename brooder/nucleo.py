@@ -33,10 +33,12 @@ import torch
 from brooder.cerebro import CerebroBrooder
 from brooder.constantes import (
     N_PRIMITIVAS,
+    N_RANURAS_DISPOSITIVO,
     OBS_DIM,
     TABLA_PRIMITIVAS,
     Tarea,
     Primitiva,
+    formatear_trazado_dispositivo,
     tokens_a_texto,
 )
 from brooder.estado import EstadoBrooder, RegistroSolicitud
@@ -210,6 +212,16 @@ class NucleoBrooder:
         if resultado.solicitud.tarea == Tarea.AVISO:
             detalle.append(f"pitidos={len(instante.pitidos)}")
         if resultado.solicitud.tarea == Tarea.DISPOSITIVO:
+            # Fase 1.5: en los modos de almacenamiento, el veredicto
+            # muestra la ranura implicada — la prueba de que el dato
+            # vive en el medio extraíble, no en la máquina
+            modo = resultado.solicitud.datos.get("modo")
+            K = resultado.solicitud.datos.get("K")
+            if modo in ("escribir", "leer") and K is not None:
+                valor = instante.dispositivo_ranuras[K]
+                detalle.append(
+                    f"pendrive[{K}]='{tokens_a_texto([valor])}'"
+                )
             if instante.dispositivo_montado:
                 detalle.append("pendrive=montado")
             elif instante.dispositivo_conectado:
@@ -236,6 +248,15 @@ class NucleoBrooder:
     def diagnostico(self) -> dict:
         """Chequeo del sistema sin involucrar a la red neuronal."""
         instante = self.maquina.instante()
+        if instante.dispositivo_montado:
+            pendrive = (
+                f"montado; {N_RANURAS_DISPOSITIVO} ranuras; "
+                + (tokens_a_texto(instante.dispositivo_ranuras) or "(vacias)")
+            )
+        elif instante.dispositivo_conectado:
+            pendrive = "conectado (sin montar)"
+        else:
+            pendrive = "ausente"
         return {
             "estado_sistema": self.estado.resumen(),
             "dispositivos": {
@@ -243,6 +264,12 @@ class NucleoBrooder:
                 "pantalla": tokens_a_texto(instante.pantalla) or "(vacía)",
                 "disco": tokens_a_texto(instante.disco_contenido),
                 "ram": tokens_a_texto(instante.memoria_contenido),
+                # Fase 1.5: el pendrive y su trazado I/O propio
+                "pendrive": pendrive,
+                "trazado_io_pendrive": [
+                    formatear_trazado_dispositivo(e)
+                    for e in instante.dispositivo_trazado
+                ],
                 "teclado_pendiente": instante.teclado_pendientes,
                 "ultimo_error": instante.ultimo_error or "(ninguno)",
             },
@@ -261,10 +288,10 @@ def aviso_contrato(cerebro) -> str | None:
     menos canales de percepción que el kernel actual) arranca sin
     problemas gracias a la compatibilidad de prefijo, pero no puede
     decidir sobre el hardware nuevo: sus cabezas nunca emiten ids
-    >= n_primitivas y los canales del dispositivo quedan fuera de su
-    ventana de percepción. ``arrancar``, ``demo`` y ``diagnostico``
-    usan este aviso para explicar el desfase y su remedio ANTES de
-    que el usuario vea [FALLO]s sin causa aparente.
+    >= n_primitivas y los canales nuevos quedan fuera de su ventana
+    de percepción. ``arrancar``, ``demo`` y ``diagnostico`` usan
+    este aviso para explicar el desfase y su remedio ANTES de que
+    el usuario vea [FALLO]s sin causa aparente.
     """
     salidas = getattr(cerebro, "n_primitivas", N_PRIMITIVAS)
     entradas = getattr(cerebro, "dim_entrada", OBS_DIM)
@@ -279,7 +306,7 @@ def aviso_contrato(cerebro) -> str | None:
         )
     if entradas < OBS_DIM:
         partes.append(
-            f"no percibe los canales del dispositivo "
+            f"no percibe los canales nuevos del dispositivo "
             f"(observación {entradas}/{OBS_DIM})"
         )
     return "el cerebro montado habla un contrato viejo: " + " y ".join(partes)

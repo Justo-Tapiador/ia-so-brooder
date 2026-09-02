@@ -64,10 +64,22 @@ def test_solicitudes_son_coherentes(rng):
             assert s.tarea == tarea
             assert s.presupuesto > 0
             if tarea == Tarea.DISPOSITIVO:
-                # evento de hardware: sin teclado y sin salida esperada
-                assert s.tokens == []
-                assert s.esperado == []
-                assert s.datos["modo"] in ("montar", "desmontar")
+                modo = s.datos["modo"]
+                assert modo in ("montar", "desmontar", "escribir", "leer")
+                if modo in ("montar", "desmontar"):
+                    # evento de hardware: sin teclado ni salida esperada
+                    assert s.tokens == []
+                    assert s.esperado == []
+                else:
+                    # Fase 1.5: modo de almacenamiento — teclado con la
+                    # ranura (y el valor, solo en "escribir") y salida
+                    # esperada = el valor recuperado del medio
+                    assert 0 <= s.datos["K"] < 8
+                    assert s.esperado == [s.datos["V"]]
+                    if modo == "escribir":
+                        assert s.tokens == [s.datos["K"], s.datos["V"], s.datos["K"]]
+                    else:  # leer: el valor NO se teclea, vive en el medio
+                        assert s.tokens == [s.datos["K"]]
             else:
                 assert len(s.tokens) > 0
                 assert s.esperado  # toda tarea clásica tiene salida esperada

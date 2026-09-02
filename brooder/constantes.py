@@ -65,6 +65,10 @@ def texto_a_tokens(texto: str):
 # ============================================================
 N_RANURAS_DISCO = 10     # el disco tiene 10 ranuras direccionables (0..9)
 N_RANURAS_MEMORIA = 10   # la RAM tiene 10 ranuras direccionables (0..9)
+# Fase 1.5: el pendrive es un dispositivo pequeño (8 ranuras, 0..7):
+# menos capacidad que el disco interno — es un medio extraíble, no
+# un reemplazo del almacenamiento de la máquina.
+N_RANURAS_DISPOSITIVO = 8
 PANTALLA_MAX = 32        # capacidad máxima de la pantalla (en tokens)
 
 # Presupuesto de ciclos por solicitud. El núcleo corta la atención
@@ -76,9 +80,16 @@ PRESUPUESTO_CICLOS = {
     "GUARDAR": 26,
     "RECORDAR": 26,
     "AVISO": 20,
-    # administrar el pendrive es una decisión de 1 ciclo; el
-    # presupuesto da margen para explorar sin ser infinito
-    "DISPOSITIVO": 12,
+    # Fase 1: administrar el pendrive es una decisión de 1 ciclo; el
+    # presupuesto daba margen para explorar sin ser infinito.
+    # Fase 1.5: los modos de ALMACENAMIENTO (escribir/leer datos en
+    # el pendrive montado) necesitan el ciclo completo de una tarea
+    # de almacenamiento — montar + direccionar + escribir + trazar +
+    # leer + mostrar, el mismo arco que GUARDAR —, así que el
+    # presupuesto de la tarea DISPOSITIVO se iguala al del disco (los
+    # modos de solo montar/desmontar siguen resolviéndose en 1-7
+    # ciclos: la presión de -0.01/ciclo premia la eficiencia).
+    "DISPOSITIVO": 26,
 }
 
 
@@ -181,6 +192,18 @@ class Primitiva(IntEnum):
     MONTAR_DISPOSITIVO = 18    # monta el pendrive presente en el conector
     DESMONTAR_DISPOSITIVO = 19  # desmonta limpio (libera el pendrive)
 
+    # --- Fase 1.5: almacenamiento real en el pendrive montado --------
+    # El plan de datos del dispositivo, espejo del par de disco/RAM
+    # (mover/leer/escribir) pero contra las ranuras del pendrive y
+    # SOLO accesible con el dispositivo montado: el kernel rechaza
+    # las tres si no hay un pendrive montado en el conector. Igual
+    # que las macro-primitivas anteriores, se añaden AL FINAL del
+    # enum para no renumerar nada: los cerebros del contrato 24x20
+    # siguen montando (compatibilidad de prefijo) hasta migrar.
+    MOVER_PUNTERO_DISPOSITIVO = 20  # puntero del pendrive <- dirección (0..7)
+    LEER_DISPOSITIVO = 21           # bus <- ranura del pendrive
+    ESCRIBIR_DISPOSITIVO = 22       # ranura del pendrive <- valor del bus
+
 
 N_PRIMITIVAS = len(Primitiva)
 
@@ -207,10 +230,12 @@ PRIMITIVAS_DATO_BUS = {
     Primitiva.CPU_SUMAR,
     Primitiva.ESCRIBIR_DISCO,
     Primitiva.ESCRIBIR_MEMORIA,
+    Primitiva.ESCRIBIR_DISPOSITIVO,
 }
 PRIMITIVAS_DIRECCION = {
     Primitiva.MOVER_CABEZAL_DISCO,
     Primitiva.MOVER_PUNTERO_MEMORIA,
+    Primitiva.MOVER_PUNTERO_DISPOSITIVO,
 }
 
 
@@ -298,6 +323,24 @@ TABLA_PRIMITIVAS = {
         "Desmonta el pendrive de forma limpia (extracción segura). "
         "El desmontaje queda anotado en el registro del sistema.",
     ),
+    # --- Fase 1.5: plan de datos del pendrive (requiere montaje) -----
+    Primitiva.MOVER_PUNTERO_DISPOSITIVO: InfoPrimitiva(
+        "mover_puntero_dispositivo(d)", True,
+        "Posiciona el puntero del pendrive en la ranura d (0..7). "
+        "Requiere dispositivo montado.", "direccion"
+    ),
+    Primitiva.LEER_DISPOSITIVO: InfoPrimitiva(
+        "leer_dispositivo()", False,
+        "Lee el token bajo el puntero del pendrive y lo deposita en el "
+        "bus. Requiere dispositivo montado. La lectura queda anotada "
+        "en el trazado I/O del dispositivo.",
+    ),
+    Primitiva.ESCRIBIR_DISPOSITIVO: InfoPrimitiva(
+        "escribir_dispositivo(bus)", True,
+        "Escribe en la ranura del puntero el valor del bus. Requiere "
+        "dispositivo montado. La escritura queda anotada en el "
+        "trazado I/O del dispositivo.", "bus"
+    ),
 }
 
 
@@ -352,6 +395,27 @@ MENSAJE_LOG_EXTRACCION_INSEGURA = 10
 REGISTRO_CAPACIDAD = 8      # entradas retenidas en el anillo
 REGISTRO_PANEL_LINEAS = 4   # líneas visibles del panel en la TUI
 
+# Fase 1.5: trazado I/O PROPIO del pendrive. Cada leer/escribir sobre
+# el dispositivo montado deja una entrada en el anillo del propio
+# dispositivo (paso, tipo, ranura, valor): es el "smart-log" del
+# medio extraíble, separado del registro del sistema (que solo anota
+# el ciclo de vida: montar/desmontar/extracción). Se vacía en frío.
+TRAZADO_DISPOSITIVO_CAPACIDAD = 12  # entradas retenidas en el anillo
+TRAZADO_DISPOSITIVO_PANEL = 4       # líneas visibles en monitor/demo
+
+
+def formatear_trazado_dispositivo(entrada: tuple) -> str:
+    """Entrada (paso, tipo, ranura, valor) -> línea legible del panel.
+
+    tipo: "lectura" | "escritura". Sin acentos en las etiquetas cortas
+    por la misma política de codificación del resto del vocabulario.
+    """
+    paso, tipo, ranura, valor = entrada
+    letra = "E" if tipo == "escritura" else "L"
+    flecha = "<-" if tipo == "escritura" else "->"
+    ch = CARACTER_DE_TOKEN.get(valor, "?")
+    return f"[{paso:04d}] {letra} ranura[{ranura}] {flecha} '{ch}'"
+
 
 def formatear_registro(paso: int, mensaje: int) -> str:
     """Entrada (paso, id_mensaje) -> línea legible del panel."""
@@ -400,18 +464,20 @@ MASCARA_ARGUMENTOS = mascara_argumentos()
 # ============================================================
 # Vector de percepción (ver brooder/percepcion.py):
 #   one-hot de las tareas CLÁSICAS (5) + 16 señales escalares
-#   + 3 canales del dispositivo externo (Fase 1).
+#   + 5 canales del dispositivo externo (Fase 1: tarea/conectado/
+#   montado; Fase 1.5: puntero y escrituras).
 #
 # La tarea DISPOSITIVO NO entra en el one-hot: usa su canal escalar
 # propio AL FINAL del vector (disp_tarea). Motivo: el contrato de
-# percepción se EXTIENDE POR EL FINAL — las 21 primeras posiciones
-# son bit a bit las del contrato viejo, así que un cerebro incubado
-# con OBS_DIM=21 percibe exactamente lo que percibía: el núcleo
+# percepción se EXTIENDE POR EL FINAL — las primeras posiciones son
+# bit a bit las del contrato viejo, así que un cerebro incubado con
+# OBS_DIM menor percibe exactamente lo que percibía: el núcleo
 # recorta la observación a dim_entrada del cerebro montado (ver
 # nucleo.NucleoBrooder e incubadora.evaluar). Es la misma política
 # de compatibilidad que añadir primitivas AL FINAL del enum.
 N_TAREAS_CLASICAS = 5      # ECO..AVISO (la tarea DISPOSITIVO va aparte)
-N_CANALES_DISPOSITIVO = 3  # disp_tarea | disp_conectado | disp_montado
+N_CANALES_DISPOSITIVO = 5  # disp_tarea | disp_conectado | disp_montado
+#                          # | disp_puntero | disp_escrituras (Fase 1.5)
 OBS_DIM = N_TAREAS_CLASICAS + 16 + N_CANALES_DISPOSITIVO
 
 # Espacio de acción factorizado:

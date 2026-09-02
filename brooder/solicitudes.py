@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from brooder.constantes import (
     LETRAS_ENTRENAMIENTO,
+    N_RANURAS_DISPOSITIVO,
     PRESUPUESTO_CICLOS,
     TOKEN_ALARMA,
     TOKEN_DE_CARACTER,
@@ -73,14 +74,40 @@ class Solicitud:
         if self.tarea == Tarea.AVISO:
             return self.pitidos_validos(m) == 1
         if self.tarea == Tarea.DISPOSITIVO:
-            # la pantalla debe quedar vacía (no hay nada que mostrar:
-            # administrar hardware no produce salida de consola) y el
-            # pendrive debe quedar en el estado pedido, AÚN CONECTADO:
-            # desmontar no es perder el dispositivo, es liberarlo de
-            # forma segura para que el mundo pueda retirarlo.
-            if self.datos.get("modo") == "desmontar":
+            # la pantalla debe quedar vacía en los modos de ciclo de
+            # vida (no hay nada que mostrar: administrar hardware no
+            # produce salida de consola) y el pendrive debe quedar en
+            # el estado pedido, AÚN CONECTADO: desmontar no es perder
+            # el dispositivo, es liberarlo de forma segura para que
+            # el mundo pueda retirarlo.
+            modo = self.datos.get("modo")
+            if modo == "desmontar":
                 return (not m.dispositivo_montado) and m.dispositivo_conectado
-            return m.dispositivo_montado and m.dispositivo_conectado
+            if modo == "montar":
+                return m.dispositivo_montado and m.dispositivo_conectado
+            # Fase 1.5: modos de ALMACENAMIENTO. El éxito exige el
+            # triple verificable por hardware: dispositivo montado,
+            # dato en la ranura pedida y el valor recuperado en
+            # pantalla. La condición de ranura impide "adivinar"
+            # mostrando lo tecleado sin escribir; en modo leer, el
+            # valor NUNCA pasó por el teclado (solo lo trae el
+            # pendrive), así que la pantalla solo puede llenarse con
+            # una lectura genuina del dispositivo.
+            if modo == "escribir":
+                K, V = self.datos["K"], self.datos["V"]
+                return (
+                    m.dispositivo_montado
+                    and m.dispositivo_conectado
+                    and m.dispositivo_ranuras[K] == V
+                    and list(m.pantalla) == [V]
+                )
+            if modo == "leer":
+                K, V = self.datos["K"], self.datos["V"]
+                return (
+                    m.dispositivo_montado
+                    and m.dispositivo_conectado
+                    and list(m.pantalla) == [V]
+                )
         return False
 
     def pitidos_validos(self, m: InstanteMaquina) -> int:
@@ -113,7 +140,13 @@ class Solicitud:
         if self.tarea == Tarea.AVISO:
             return f"aviso('{tokens_a_texto([self.datos['X']])}')"
         if self.tarea == Tarea.DISPOSITIVO:
-            return f"dispositivo({self.datos.get('modo', 'montar')})"
+            modo = self.datos.get("modo", "montar")
+            if modo in ("escribir", "leer"):
+                return (
+                    f"dispositivo({modo} K={self.datos['K']}, "
+                    f"V='{tokens_a_texto([self.datos['V']])}')"
+                )
+            return f"dispositivo({modo})"
         return self.tarea.name
 
     # --------------------------------------------------
@@ -158,15 +191,32 @@ class Solicitud:
             )
 
         if tarea == Tarea.DISPOSITIVO:
-            # Fase 1: administrar el pendrive del conector. La
-            # solicitud no entra por el teclado (no hay nada que
-            # teclear) ni espera salida en pantalla: es un evento de
-            # hardware. El ENTORNO conecta el pendrive al empezar; en
-            # modo "desmontar" lo deja además ya montado (lo montó
-            # "la sesión anterior"), y la política debe decidir el
-            # montar/desmontar que corresponda leyendo los canales de
-            # percepción del dispositivo.
-            modo = rng.choice(("montar", "desmontar"))
+            # Fase 1: administrar el pendrive del conector. Las
+            # solicitudes de CICLO DE VIDA no entran por el teclado ni
+            # esperan salida en pantalla: son eventos de hardware.
+            # Fase 1.5: los modos de ALMACENAMIENTO (escribir/leer)
+            # replican el contrato de GUARDAR contra el pendrive:
+            # "escribir 3 P" teclea ranura y valor, y el éxito exige
+            # escribir de verdad y recuperar el valor del dispositivo
+            # (pantalla = V); "leer 3 P" NO teclea el valor — viene
+            # grabado en el pendrive que enchufa el entorno — y la
+            # única forma de mostrarlo es leer el dispositivo.
+            modo = rng.choice(
+                ("montar", "desmontar", "escribir", "leer")
+            )
+            if modo in ("escribir", "leer"):
+                K = rng.randrange(N_RANURAS_DISPOSITIVO)
+                V = rng.choice(LETRAS_ENTRENAMIENTO)
+                if modo == "escribir":
+                    # como GUARDAR: ranura, valor, ranura
+                    tokens = [K, V, K]
+                else:
+                    # solo la ranura: el valor vive en el pendrive
+                    tokens = [K]
+                return Solicitud(
+                    Tarea.DISPOSITIVO, tokens=tokens, esperado=[V],
+                    datos={"modo": modo, "K": K, "V": V},
+                )
             return Solicitud(
                 Tarea.DISPOSITIVO, tokens=[], esperado=[],
                 datos={"modo": modo},
@@ -178,7 +228,20 @@ class Solicitud:
     # construcción desde texto (para el intérprete interactivo)
     # --------------------------------------------------
     _PATRON_SUMA = re.compile(r"^(\d)\s*\+\s*(\d)$")
-    _PATRON_PAR = re.compile(r"^(\d)\s+([A-Z])$")
+    # Hotfix de campo (post-Fase 1.5): el espacio entre número y letra
+    # es OPCIONAL en los pares. 'leer 3P' es la misma solicitud que
+    # 'leer 3 P', igual que '3+5' y '3 + 5' ya eran la misma suma — el
+    # dedo del usuario pega dígito y letra porque la aritmética no usa
+    # espacios, y el parser no debía castigarlo.
+    _PATRON_PAR = re.compile(r"^(\d)\s*([A-Z])$")
+    # Y el límite honesto: el espacio tras el VERBO sigue siendo
+    # obligatorio. 'leer3P' no es un eco válido ni un par: devolver
+    # None hace que el intérprete muestre el remedio (la línea de
+    # formatos) en vez de encomendarle al cerebro un eco confuso
+    # con dígitos que nunca entrenó (condenado a [FALLO]).
+    _PATRON_VERBO_PEGADO = re.compile(
+        r"^(?:ECO|SUMA|GUARDAR|RECORDAR|AVISO|ESCRIBIR|LEER|MONTAR|DESMONTAR)\S"
+    )
 
     @staticmethod
     def desde_texto(texto: str) -> "Solicitud | None":
@@ -194,12 +257,22 @@ class Solicitud:
           aviso A         -> AVISO
           montar          -> DISPOSITIVO (montar el pendrive del conector)
           desmontar       -> DISPOSITIVO (extracción segura)
+          escribir 3 P    -> DISPOSITIVO (guardar P en la ranura 3 del
+                            pendrive montado y recuperarla en pantalla)
+          leer 3 P        -> DISPOSITIVO (leer la ranura 3 del pendrive
+                            montado; P es el valor esperado)
+
+        El espacio entre número y letra es opcional en los pares
+        ('leer 3P' = 'leer 3 P'), como ya lo era en la suma ('3+5' =
+        '3 + 5'); el espacio tras el verbo no ('leer3P' no parsea y
+        el intérprete responde con el remedio).
         """
         t = texto.strip().upper()
         if not t:
             return None
 
-        if t.startswith(("ECO ", "SUMA ", "GUARDAR ", "RECORDAR ", "AVISO ")):
+        if t.startswith(("ECO ", "SUMA ", "GUARDAR ", "RECORDAR ", "AVISO ",
+                         "ESCRIBIR ", "LEER ")):
             verbo, resto = t.split(" ", 1)
         elif t in ("MONTAR", "DESMONTAR"):
             # Fase 1: solicitudes de dispositivo (sin argumentos). Si
@@ -210,6 +283,11 @@ class Solicitud:
                 Tarea.DISPOSITIVO, tokens=[], esperado=[],
                 datos={"modo": t.lower()},
             )
+        elif Solicitud._PATRON_VERBO_PEGADO.match(t):
+            # verbo pegado a su argumento ('leer3P'): el espacio tras
+            # el verbo sigue siendo obligatorio — mejor el remedio
+            # visible que un eco condenado
+            return None
         else:
             verbo, resto = "", t
 
@@ -245,6 +323,30 @@ class Solicitud:
             tarea = Tarea.GUARDAR if verbo == "GUARDAR" else Tarea.RECORDAR
             return Solicitud(tarea, tokens=[K, V, K], esperado=[V],
                              datos={"K": K, "V": V})
+
+        if verbo in ("ESCRIBIR", "LEER"):
+            # Fase 1.5: almacenamiento en el pendrive montado. Misma
+            # firma que guardar/recordar (ranura + valor), pero la
+            # tarea es DISPOSITIVO: el kernel exige montaje y las
+            # ranuras viven en el medio extraíble. En 'leer', el valor
+            # es lo QUE DEBERÍA estar ya en el pendrive (lo escribió
+            # una sesión anterior): la solicitud NO lo teclea.
+            m = Solicitud._PATRON_PAR.match(resto)
+            if not m:
+                return None
+            K = int(m.group(1))
+            V = TOKEN_DE_CARACTER[m.group(2)]
+            if K >= N_RANURAS_DISPOSITIVO:
+                return None  # el pendrive solo tiene ranuras 0..7
+            if verbo == "ESCRIBIR":
+                return Solicitud(
+                    Tarea.DISPOSITIVO, tokens=[K, V, K], esperado=[V],
+                    datos={"modo": "escribir", "K": K, "V": V},
+                )
+            return Solicitud(
+                Tarea.DISPOSITIVO, tokens=[K], esperado=[V],
+                datos={"modo": "leer", "K": K, "V": V},
+            )
 
         if verbo == "AVISO":
             tokens = texto_a_tokens(resto)

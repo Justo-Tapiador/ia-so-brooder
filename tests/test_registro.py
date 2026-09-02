@@ -44,7 +44,9 @@ def test_ids_estables_para_compatibilidad():
     assert Primitiva.REGISTRAR_LOG == 17
     assert int(Primitiva.MONTAR_DISPOSITIVO) == 18
     assert int(Primitiva.DESMONTAR_DISPOSITIVO) == 19
-    assert N_PRIMITIVAS == 20
+    # Fase 1.5: el plan de datos del pendrive cierra el enum
+    assert int(Primitiva.ESCRIBIR_DISPOSITIVO) == 22
+    assert N_PRIMITIVAS == 23
     assert set(TABLA_PRIMITIVAS) == set(Primitiva)
     assert TABLA_PRIMITIVAS[Primitiva.REGISTRAR_LOG].tipo_argumento == "mensaje"
     assert len(MENSAJES_LOG) == N_MENSAJES_LOG

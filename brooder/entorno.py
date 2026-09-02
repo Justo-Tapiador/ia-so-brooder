@@ -11,14 +11,15 @@ Diseño de recompensas (denso, para acelerar el aprendizaje):
   -0.01   cada ciclo consumido           (presión de eficiencia)
   +0.08   carácter correcto en pantalla  (progreso verificado)
   +0.15   uso correcto de la CPU (suma alcanzada)
-  +0.25   escritura correcta en disco/RAM
+  +0.25   escritura correcta en disco/RAM/pendrive
   +0.15   lectura correcta del dato almacenado
   +0.30   pitido válido (tras leer ALARMA)
   -0.15   escritura en el dispositivo equivocada
   -0.30   pitido prematuro o repetido
   +0.10   trazar con REGISTRAR_LOG la operación de
           almacenamiento correcta, en tareas de almacenamiento
-          (GUARDAR/RECORDAR; ≤ TRAZO_VENTANA ciclos después;
+          (GUARDAR/RECORDAR/DISPOSITIVO-escribir/leer;
+          ≤ TRAZO_VENTANA ciclos después;
           máximo 1 premio por tipo/solicitud)
   -0.03   REGISTRAR_LOG con un mensaje ya emitido en la
           solicitud (suprime el spam de repeticiones)
@@ -34,6 +35,7 @@ entorno es resoluble al 100 %, y (2) comparar qué tan lejos está la
 IA del programa perfecto. Desde la Fase 0.5 el oráculo también
 traza: registra la escritura y la lectura de almacenamiento justo
 después de ejecutarlas, y sirve de referencia del 100 % de trazado.
+Desde la Fase 1.5 traza igual la I/O del pendrive montado.
 """
 from __future__ import annotations
 
@@ -84,10 +86,22 @@ TRAZO_VENTANA = 2      # ciclos máx. entre la operación y su traza
 # un señuelo (escribir en RAM por escribir para luego trazarlo) que
 # distrae del aprendizaje de la tarea (bug real de la primera
 # incubación de la Fase 0.5: SUMA se estancó al 45 %).
-TRAZO_TAREAS = (Tarea.GUARDAR, Tarea.RECORDAR)
+# Fase 1.5: la tarea DISPOSITIVO se une a la familia — sus modos de
+# almacenamiento (escribir/leer el pendrive) son I/O declarable con
+# los mismos mensajes 1/2; en los modos de ciclo de vida (montar/
+# desmontar) no hay operaciones trazables, así que no cuentan.
+TRAZO_TAREAS = (Tarea.GUARDAR, Tarea.RECORDAR, Tarea.DISPOSITIVO)
 # operaciones de almacenamiento que el oráculo/la IA pueden trazar
-OPERACIONES_ESCRITURA = (Primitiva.ESCRIBIR_DISCO, Primitiva.ESCRIBIR_MEMORIA)
-OPERACIONES_LECTURA = (Primitiva.LEER_DISCO, Primitiva.LEER_MEMORIA)
+OPERACIONES_ESCRITURA = (
+    Primitiva.ESCRIBIR_DISCO,
+    Primitiva.ESCRIBIR_MEMORIA,
+    Primitiva.ESCRIBIR_DISPOSITIVO,
+)
+OPERACIONES_LECTURA = (
+    Primitiva.LEER_DISCO,
+    Primitiva.LEER_MEMORIA,
+    Primitiva.LEER_DISPOSITIVO,
+)
 _MENSAJE_POR_TIPO = {
     "lectura": MENSAJE_LOG_LECTURA,
     "escritura": MENSAJE_LOG_ESCRITURA,
@@ -163,12 +177,25 @@ class EntornoBrooder:
         self.maquina.reiniciar()
         self.maquina.escribir_teclado(self.solicitud.tokens)
         # Fase 1: en las solicitudes de dispositivo, el mundo exterior
-        # enchufa el pendrive (hot-plug del kernel). En modo
-        # "desmontar" lo deja ADEMÁS montado — lo montó la sesión
-        # anterior — para que el trabajo de la política sea liberarlo.
+        # enchufa el pendrive (hot-plug del kernel). En modo "desmontar"
+        # lo deja ADEMÁS montado — lo montó la sesión anterior — para que
+        # el trabajo de la política sea liberarlo.
+        # Fase 1.5: los modos de ALMACENAMIENTO también reciben el medio
+        # YA MONTADO (misma convención que desmontar: lo montó la
+        # solicitud 'montar' previa — el plano de datos de la Fase 1.5
+        # opera sobre el pendrive montado, no re-decide el montaje). En
+        # modo "leer" el pendrive llega además CON DATOS (los grabó la
+        # sesión anterior): el valor esperado nunca pasa por el teclado,
+        # la única fuente es el propio dispositivo.
         if tarea in TAREAS_DISPOSITIVO:
-            self.maquina.conectar_dispositivo()
-            if self.solicitud.datos.get("modo") == "desmontar":
+            modo = self.solicitud.datos.get("modo")
+            contenido = None
+            if modo == "leer":
+                contenido = {
+                    self.solicitud.datos["K"]: self.solicitud.datos["V"]
+                }
+            self.maquina.conectar_dispositivo(contenido=contenido)
+            if modo != "montar":
                 self.maquina.montar_dispositivo()
         self.ciclos_restantes = self.solicitud.presupuesto
         self._suma_moldeada = False
@@ -277,6 +304,20 @@ class EntornoBrooder:
                 recompensa += R_DIRECCION_OK
                 self._direccion_moldeada = True
 
+        # Fase 1.5: lo mismo contra el pendrive — posicionar el
+        # puntero del dispositivo en la ranura pedida ya es progreso
+        if (
+            primitiva == Primitiva.MOVER_PUNTERO_DISPOSITIVO
+            and not self._direccion_moldeada
+        ):
+            if (
+                sol.tarea in TAREAS_DISPOSITIVO
+                and sol.datos.get("modo") in ("escribir", "leer")
+                and instante.dispositivo_puntero == sol.datos["K"]
+            ):
+                recompensa += R_DIRECCION_OK
+                self._direccion_moldeada = True
+
         # --- moldeado: disco y RAM ------------------------------
         # Las consecuencias de un dispositivo solo se evalúan en las
         # tareas donde ese dispositivo importa, y solo en positivo:
@@ -304,6 +345,22 @@ class EntornoBrooder:
                 recompensa += R_ESCRITURA_OK
                 self._escritura_moldeada = True
 
+        # Fase 1.5: escritura en el pendrive (modo escribir) — el dato
+        # aterriza en la ranura pedida del medio extraíble
+        if (
+            instante.escrituras_dispositivo
+            > instante_antes.escrituras_dispositivo
+        ):
+            if (
+                sol.tarea in TAREAS_DISPOSITIVO
+                and sol.datos.get("modo") == "escribir"
+                and instante.dispositivo_puntero == sol.datos["K"]
+                and instante.dispositivo_ranuras[sol.datos["K"]] == sol.datos["V"]
+                and not self._escritura_moldeada
+            ):
+                recompensa += R_ESCRITURA_OK
+                self._escritura_moldeada = True
+
         if primitiva == Primitiva.LEER_DISCO and not self._lectura_moldeada:
             if (
                 sol.tarea == Tarea.GUARDAR
@@ -318,6 +375,21 @@ class EntornoBrooder:
                 sol.tarea == Tarea.RECORDAR
                 and instante.memoria_puntero == sol.datos["K"]
                 and instante.memoria_contenido[sol.datos["K"]] == sol.datos["V"]
+            ):
+                recompensa += R_LECTURA_ALMACEN_OK
+                self._lectura_moldeada = True
+
+        # Fase 1.5: lectura del pendrive (modo leer) — el valor que
+        # solo existía en el medio extraíble llega al bus
+        if (
+            primitiva == Primitiva.LEER_DISPOSITIVO
+            and not self._lectura_moldeada
+        ):
+            if (
+                sol.tarea in TAREAS_DISPOSITIVO
+                and sol.datos.get("modo") == "leer"
+                and instante.dispositivo_puntero == sol.datos["K"]
+                and instante.bus_valor == sol.datos["V"]
             ):
                 recompensa += R_LECTURA_ALMACEN_OK
                 self._lectura_moldeada = True
@@ -366,7 +438,10 @@ class EntornoBrooder:
         # en la tarea DISPOSITIVO (anti-señuelo). La dirección equivoca
         # (p. ej. desmontar cuando se pide montar) fracasa en la
         # máquina: paga su ciclo, sin castigo extra — igual que el
-        # resto del moldeado de dispositivos.
+        # resto del moldeado de dispositivos. Fase 1.5: los modos de
+        # almacenamiento reciben el medio YA montado (como desmontar),
+        # así que su premio vive en el moldeado del plano de datos
+        # (dirección/escritura/lectura), no aquí.
         if (
             sol.tarea in TAREAS_DISPOSITIVO
             and exito_ejecucion
@@ -541,10 +616,34 @@ class Oraculo:
             # sin montar -> montar; montado -> desmontar (extracción
             # segura). El kernel anota ambas operaciones en su
             # registro (dmesg) sin intervención del oráculo.
-            if s.datos.get("modo") == "desmontar":
+            modo = s.datos.get("modo")
+            if modo == "desmontar":
                 p += [(Primitiva.DESMONTAR_DISPOSITIVO, 0)]
-            else:
+            elif modo == "montar":
                 p += [(Primitiva.MONTAR_DISPOSITIVO, 0)]
+            elif modo == "escribir":
+                # Fase 1.5: el arco de una escritura sobre el medio YA
+                # montado (el montaje lo decidió la solicitud 'montar'
+                # previa): leer la ranura y el valor del teclado,
+                # escribir y declararlo (trazado), leer de vuelta y
+                # declararlo, y mostrar el valor recuperado como prueba.
+                p += [(Primitiva.LEER_TECLADO, 0),
+                      (Primitiva.MOVER_PUNTERO_DISPOSITIVO, ARG_BUS)]
+                p += [(Primitiva.LEER_TECLADO, 0),
+                      (Primitiva.ESCRIBIR_DISPOSITIVO, ARG_BUS)]
+                p += [(Primitiva.REGISTRAR_LOG, MENSAJE_LOG_ESCRITURA)]
+                p += [(Primitiva.LEER_DISPOSITIVO, 0),
+                      (Primitiva.REGISTRAR_LOG, MENSAJE_LOG_LECTURA)]
+                p += [(Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
+            elif modo == "leer":
+                # Fase 1.5: el valor vive en el pendrive montado —
+                # posicionar la ranura tecleada, leer el medio,
+                # declarar la lectura y mostrarla.
+                p += [(Primitiva.LEER_TECLADO, 0),
+                      (Primitiva.MOVER_PUNTERO_DISPOSITIVO, ARG_BUS)]
+                p += [(Primitiva.LEER_DISPOSITIVO, 0)]
+                p += [(Primitiva.REGISTRAR_LOG, MENSAJE_LOG_LECTURA)]
+                p += [(Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
 
         # margen de reposo hasta que el núcleo declare el éxito
         p += [(Primitiva.NADA, 0)] * 6

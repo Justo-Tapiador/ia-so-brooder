@@ -72,8 +72,12 @@ def test_ids_estables_para_compatibilidad():
     assert int(Primitiva.REGISTRAR_LOG) == 17
     assert int(Primitiva.MONTAR_DISPOSITIVO) == 18
     assert int(Primitiva.DESMONTAR_DISPOSITIVO) == 19
-    assert N_PRIMITIVAS == 20
-    assert int(Primitiva.DESMONTAR_DISPOSITIVO) == N_PRIMITIVAS - 1
+    # Fase 1.5: plan de datos del pendrive, tras las de ciclo de vida
+    assert int(Primitiva.MOVER_PUNTERO_DISPOSITIVO) == 20
+    assert int(Primitiva.LEER_DISPOSITIVO) == 21
+    assert int(Primitiva.ESCRIBIR_DISPOSITIVO) == 22
+    assert N_PRIMITIVAS == 23
+    assert int(Primitiva.ESCRIBIR_DISPOSITIVO) == N_PRIMITIVAS - 1
 
 
 def test_mensajes_de_dispositivo_son_ids_estables():
@@ -192,7 +196,7 @@ def _obs_de(maquina, tarea, solicitud, ciclos=10):
 
 def test_dimensiones_del_vector_de_percepcion():
     assert OBS_DIM == N_TAREAS_CLASICAS + 16 + N_CANALES_DISPOSITIVO
-    assert OBS_DIM == 24
+    assert OBS_DIM == 26  # 24 (Fase 1) + puntero + escrituras (Fase 1.5)
     assert len(nombre_de_canales()) == OBS_DIM
     # las tareas del enum: 5 clásicas + DISPOSITIVO
     assert N_TAREAS == 6
@@ -203,6 +207,8 @@ def test_canales_de_dispositivo_reflejan_el_estado(maquina):
     sol = Solicitud(Tarea.ECO, tokens=[1, 2, 3], esperado=[1, 2, 3])
     obs = _obs_de(maquina, Tarea.ECO, sol)
     assert obs[21] == 0.0 and obs[22] == 0.0 and obs[23] == 0.0
+    # Fase 1.5: sin dispositivo, puntero/escrituras del medio a cero
+    assert obs[24] == 0.0 and obs[25] == 0.0
 
     maquina.conectar_dispositivo()
     obs = _obs_de(maquina, Tarea.ECO, sol)
@@ -218,25 +224,41 @@ def test_canales_de_dispositivo_reflejan_el_estado(maquina):
     assert obs[21] == 1.0
     assert sum(obs[:N_TAREAS_CLASICAS]) == 0.0
 
+    # Fase 1.5: el canal del puntero normaliza la ranura del medio
+    maquina.mover_puntero_dispositivo(6)
+    obs = _obs_de(maquina, Tarea.DISPOSITIVO, disp)
+    assert obs[24] == pytest.approx(6 / 7)
+    assert obs[25] == 0.0  # aún no se ha escrito en el pendrive
+
 
 def test_prefijo_de_percepcion_es_el_contrato_viejo(maquina):
-    """Las 21 primeras posiciones no dependen del estado del pendrive:
-    un cerebro del contrato viejo percibe bit a bit lo que percibía."""
-    maquina.escribir_teclado([10, 11, 12])
+    """El ALMACENAMIENTO del pendrive no toca el prefijo del contrato
+    Fase 1: un cerebro 24x20 percibe bit a bit lo mismo con el medio
+    vacío o con una ranura escrita (solo se enciende su canal propio)."""
+    # el bus se fija ANTES (leer un token) para que las dos
+    # observaciones compartan TODO el estado previo salvo el medio
+    maquina.escribir_teclado([25, 11, 12])
+    maquina.leer_teclado()  # bus <- 25 ('P'): el valor que se escribirá
     sol = Solicitud(Tarea.ECO, tokens=[10, 11, 12], esperado=[10, 11, 12])
-    obs_vacia = _obs_de(maquina, Tarea.ECO, sol)
     maquina.conectar_dispositivo()
     maquina.ejecutar(Primitiva.MONTAR_DISPOSITIVO, 0)
-    obs_montado = _obs_de(maquina, Tarea.ECO, sol)
-    assert obs_vacia[:21] == obs_montado[:21]
-    assert obs_montado[22:] == [1.0, 1.0]
+    obs_vacio = _obs_de(maquina, Tarea.ECO, sol)
+    # escribir en la ranura 0 (el puntero no se mueve: el canal 24 no
+    # cambia) — la ÚNICA diferencia debe ser el canal de escrituras
+    maquina.escribir_dispositivo(38)  # ranura 0 <- bus (25)
+    obs_escrito = _obs_de(maquina, Tarea.ECO, sol)
+    assert obs_vacio[:24] == obs_escrito[:24]
+    assert obs_escrito[24] == 0.0  # el puntero sigue en la ranura 0
+    assert obs_escrito[25] == 1.0  # el canal de escrituras se enciende
 
 
 # ------------------------------------------------------------------
 # la tarea DISPOSITIVO
 # ------------------------------------------------------------------
 def test_presupuesto_de_dispositivo():
-    assert PRESUPUESTO_CICLOS["DISPOSITIVO"] == 12
+    # Fase 1.5: 26 — los modos de almacenamiento replican el arco de
+    # GUARDAR (montar + direccionar + escribir + trazar + leer + mostrar)
+    assert PRESUPUESTO_CICLOS["DISPOSITIVO"] == 26
 
 
 def test_exito_de_la_solicitud_de_dispositivo(maquina):
@@ -277,12 +299,25 @@ def test_exito_de_la_solicitud_de_dispositivo(maquina):
 
 
 def test_generador_aleatorio_de_dispositivo(rng):
-    for _ in range(40):
+    modos = set()
+    for _ in range(80):
         s = Solicitud.aleatoria(Tarea.DISPOSITIVO, rng)
         assert s.tarea == Tarea.DISPOSITIVO
-        assert s.tokens == [] and s.esperado == []
-        assert s.datos["modo"] in ("montar", "desmontar")
-        assert s.presupuesto == 12
+        assert s.presupuesto == 26
+        modo = s.datos["modo"]
+        modos.add(modo)
+        if modo in ("montar", "desmontar"):
+            assert s.tokens == [] and s.esperado == []
+        else:
+            # Fase 1.5: almacenamiento contra el medio extraíble
+            assert 0 <= s.datos["K"] < 8
+            assert s.esperado == [s.datos["V"]]
+            if modo == "escribir":
+                assert s.tokens == [s.datos["K"], s.datos["V"], s.datos["K"]]
+            else:
+                assert s.tokens == [s.datos["K"]]
+    # los cuatro modos aparecen (muestreo uniforme, 80 tiradas)
+    assert modos == {"montar", "desmontar", "escribir", "leer"}
 
 
 def test_desde_texto_montar_y_desmontar():
@@ -413,14 +448,14 @@ def test_el_trasplante_conserva_las_decisiones_clasicas():
     torch.manual_seed(2)
     viejo = CerebroBrooder(dim_entrada=21, n_primitivas=18)
     viejo.eval()
-    nuevo = CerebroBrooder()  # contrato actual: 24 entradas / 20 salidas
+    nuevo = CerebroBrooder()  # contrato actual: 26 entradas / 23 salidas
     nuevo.load_state_dict(expandir_estado_contrato(viejo.state_dict(), 21, 18))
     nuevo.eval()
 
     rng = random.Random(9)
     for _ in range(25):
         obs = [rng.uniform(-1, 1) for _ in range(OBS_DIM)]
-        obs[21:] = [0.0, 0.0, 0.0]  # sin señal de dispositivo
+        obs[21:] = [0.0] * (OBS_DIM - 21)  # sin señal de dispositivo
         with torch.no_grad():
             h1, M1 = viejo.estado_inicial()
             h2, M2 = nuevo.estado_inicial()
@@ -445,6 +480,10 @@ def test_el_trasplante_arranca_desfavoreciendo_las_primitivas_nuevas():
     nuevo.eval()
     assert int(nuevo.cabeza_primitiva.bias[Primitiva.MONTAR_DISPOSITIVO]) == -4.0
     assert int(nuevo.cabeza_primitiva.bias[Primitiva.DESMONTAR_DISPOSITIVO]) == -4.0
+    # Fase 1.5: las primitivas del plan de datos, igual de desfavorecidas
+    assert int(nuevo.cabeza_primitiva.bias[Primitiva.MOVER_PUNTERO_DISPOSITIVO]) == -4.0
+    assert int(nuevo.cabeza_primitiva.bias[Primitiva.ESCRIBIR_DISPOSITIVO]) == -4.0
+    assert int(nuevo.cabeza_primitiva.bias[Primitiva.LEER_DISPOSITIVO]) == -4.0
     # las filas de las primitivas clásicas no se tocan
     assert torch.allclose(
         nuevo.cabeza_primitiva.weight[:18], viejo.cabeza_primitiva.weight

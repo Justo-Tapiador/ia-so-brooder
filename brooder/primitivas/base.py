@@ -29,6 +29,7 @@ from brooder.constantes import (
     MENSAJE_LOG_DISP_MONTADO,
     MENSAJE_LOG_EXTRACCION_INSEGURA,
     N_RANURAS_DISCO,
+    N_RANURAS_DISPOSITIVO,
     N_RANURAS_MEMORIA,
     N_TOKENS,
     PANTALLA_MAX,
@@ -37,7 +38,10 @@ from brooder.constantes import (
     REGISTRO_CAPACIDAD,
     REGISTRO_PANEL_LINEAS,
     TABLA_PRIMITIVAS,
+    TRAZADO_DISPOSITIVO_CAPACIDAD,
+    TRAZADO_DISPOSITIVO_PANEL,
     formatear_registro,
+    formatear_trazado_dispositivo,
 )
 
 
@@ -77,12 +81,23 @@ class InstanteMaquina:
     # aceptado por decisión de la política con la macro-primitiva
     dispositivo_conectado: bool = False
     dispositivo_montado: bool = False
+    # Fase 1.5: almacenamiento real del pendrive. Las ranuras viven
+    # EN EL DISPOSITIVO (no en la máquina): sobreviven a desmontar y
+    # a que el mundo retire y vuelva a enchufar el mismo pendrive
+    # (extracción SEGURA). Solo se pierden en arranque en frío o con
+    # una extracción insegura (retirar montado: el búfer sin
+    # sincronizar se pierde, como en un USB real). El trazado I/O
+    # es el anillo propio del dispositivo.
+    dispositivo_puntero: int = 0
+    dispositivo_ranuras: tuple = field(default_factory=tuple)  # monitor
+    dispositivo_trazado: tuple = field(default_factory=tuple)  # anillo I/O
     # señalización del último ciclo
     ultimo_error: str = ""
     ultimo_evento: str = ""           # descripción legible del último ciclo
     # contadores por solicitud (los reinicia el núcleo)
     escrituras_disco: int = 0
     escrituras_memoria: int = 0
+    escrituras_dispositivo: int = 0
     usos_gpu: int = 0
     # tokens leídos del teclado durante la solicitud actual,
     # con el paso en que se leyeron (para evaluar AVISO)
@@ -214,6 +229,18 @@ class InterfazPrimitivas(ABC):
     # no puede enchufar ni desenchufar hardware, solo administrarlo.
 
     # --------------------------------------------------
+    # almacenamiento del dispositivo (Fase 1.5)
+    # --------------------------------------------------
+    @abstractmethod
+    def mover_puntero_dispositivo(self, direccion: int) -> bool: ...
+
+    @abstractmethod
+    def leer_dispositivo(self) -> bool: ...
+
+    @abstractmethod
+    def escribir_dispositivo(self, valor: int) -> bool: ...
+
+    # --------------------------------------------------
     # observación
     # --------------------------------------------------
     @abstractmethod
@@ -271,6 +298,12 @@ class InterfazPrimitivas(ABC):
             return self.montar_dispositivo()
         if primitiva == Primitiva.DESMONTAR_DISPOSITIVO:
             return self.desmontar_dispositivo()
+        if primitiva == Primitiva.MOVER_PUNTERO_DISPOSITIVO:
+            return self.mover_puntero_dispositivo(v)
+        if primitiva == Primitiva.LEER_DISPOSITIVO:
+            return self.leer_dispositivo()
+        if primitiva == Primitiva.ESCRIBIR_DISPOSITIVO:
+            return self.escribir_dispositivo(v)
         raise ValueError(f"Primitiva desconocida: {primitiva!r}")
 
 
@@ -343,6 +376,15 @@ class MaquinaBase(InterfazPrimitivas):
         # no estado del proceso) y se pierde solo en arranque en frío.
         self._disp_conectado: bool = False
         self._disp_montado: bool = False
+        # Fase 1.5: el almacenamiento del pendrive. Las ranuras y su
+        # trazado I/O viven EN EL DISPOSITIVO: un reinicio de
+        # registros (frontera entre solicitudes) no las toca, igual
+        # que el disco y la RAM. Se pierden solo en arranque en frío
+        # o por extracción insegura (ver desconectar_dispositivo).
+        self._disp_ranuras: list = [0] * N_RANURAS_DISPOSITIVO
+        self._disp_puntero: int = 0
+        self._disp_trazado: deque = deque(maxlen=TRAZADO_DISPOSITIVO_CAPACIDAD)
+        self._escrituras_disp: int = 0
         self._paso = 0
         self._ultimo_error = ""
         self._ultimo_evento = ""
@@ -366,12 +408,14 @@ class MaquinaBase(InterfazPrimitivas):
         self._pantalla = []
         self._disco_cabezal = 0
         self._memoria_puntero = 0
+        self._disp_puntero = 0
         self._pitidos = []
         self._paso = 0
         self._ultimo_error = ""
         self._ultimo_evento = "registros limpios"
         self._escrituras_disco = 0
         self._escrituras_memoria = 0
+        self._escrituras_disp = 0
         self._usos_gpu = 0
         self._teclado_leidos = []
         # el kernel descarta la entrada pendiente de la solicitud
@@ -629,12 +673,23 @@ class MaquinaBase(InterfazPrimitivas):
         self._evento("desmontar_dispositivo: dispositivo desmontado")
         return True
 
-    def conectar_dispositivo(self) -> bool:
-        """Hot-plug: el mundo exterior enchufa el pendrive (kernel)."""
+    def conectar_dispositivo(self, contenido: dict | None = None) -> bool:
+        """Hot-plug: el mundo exterior enchufa el pendrive (kernel).
+
+        ``contenido`` (Fase 1.5) permite enchufar un pendrive que YA
+        trae datos — el "contenido de fábrica" del medio: el entorno
+        de entrenamiento lo usa en las solicitudes de lectura, donde
+        el valor a recuperar nunca pasa por el teclado y la única
+        fuente posible es el propio dispositivo.
+        """
         if self._disp_conectado:
             self._error("conectar_dispositivo: ya hay dispositivo")
             return False
         self._disp_conectado = True
+        if contenido:
+            for ranura, token in contenido.items():
+                if 0 <= ranura < N_RANURAS_DISPOSITIVO and self._es_token_valido(token):
+                    self._disp_ranuras[ranura] = token
         self._evento("conector USB: pendrive conectado")
         return True
 
@@ -645,6 +700,15 @@ class MaquinaBase(InterfazPrimitivas):
         kernel lo anota como ERROR en el registro (la traza que un SO
         real deja al retirar un USB sin desmontar) y libera el estado
         del conector.
+
+        Fase 1.5 — y aquí está la gracia del almacenamiento real:
+        una extracción INSEGURA también PIERDE los datos del
+        pendrive. Retirar el medio con la escritura sin sincronizar
+        es perder el búfer, exactamente como en un USB físico; la
+        política que quiera conservar sus datos debe desmontar
+        antes de que el mundo retire el dispositivo. Una extracción
+        limpia (desmontado) conserva las ranuras: el mismo pendrive,
+        reenchufado, recuerda lo que se escribió en él.
         """
         if not self._disp_conectado:
             self._error("desconectar_dispositivo: el conector está vacío")
@@ -653,6 +717,10 @@ class MaquinaBase(InterfazPrimitivas):
         self._disp_conectado = False
         self._disp_montado = False
         if insegura:
+            # el búfer sin sincronizar se pierde: el pendrive queda
+            # "formateado" por la extracción brusca
+            self._disp_ranuras = [0] * N_RANURAS_DISPOSITIVO
+            self._disp_trazado.clear()
             self._registro.append((self._paso, MENSAJE_LOG_EXTRACCION_INSEGURA))
             self._evento("conector USB: EXTRACCION INSEGURA (pendrive montado)")
         else:
@@ -666,6 +734,76 @@ class MaquinaBase(InterfazPrimitivas):
     @property
     def dispositivo_montado(self) -> bool:
         return self._disp_montado
+
+    # --------------------------------------------------
+    # almacenamiento del dispositivo (Fase 1.5)
+    # --------------------------------------------------
+    # El plan de datos del pendrive exige MONTAJE, igual que en un SO
+    # real no se direcciona un USB que no ha sido aceptado: las tres
+    # primitivas fallan con error controlado si no hay dispositivo
+    # montado. Todo lo demás replica la semántica disco/RAM: el
+    # puntero es volátil por solicitud, las ranuras persistentes, y
+    # cada operación deja su entrada en el trazado I/O propio.
+    def mover_puntero_dispositivo(self, direccion: int) -> bool:
+        from brooder.constantes import ARG_BUS
+
+        if not self._disp_montado:
+            self._error("mover_puntero_dispositivo: dispositivo no montado")
+            return False
+        if direccion == ARG_BUS and not self._bus_valido:
+            self._error("mover_puntero_dispositivo: bus vacío")
+            return False
+        d = self._resolver(direccion, self._bus_valor)
+        if not (0 <= d < N_RANURAS_DISPOSITIVO):
+            self._error("mover_puntero_dispositivo: dirección inválida")
+            return False
+        self._disp_puntero = d
+        self._evento(f"mover_puntero_dispositivo -> {d}")
+        return True
+
+    def leer_dispositivo(self) -> bool:
+        if not self._disp_montado:
+            self._error("leer_dispositivo: dispositivo no montado")
+            return False
+        token = self._disp_ranuras[self._disp_puntero]
+        self._bus_valor = token
+        self._bus_valido = True
+        # trazado I/O propio del dispositivo (kernel, no la IA)
+        self._disp_trazado.append(
+            (self._paso, "lectura", self._disp_puntero, token)
+        )
+        self._evento(f"leer_dispositivo[{self._disp_puntero}] -> {token}")
+        return True
+
+    def escribir_dispositivo(self, valor: int) -> bool:
+        from brooder.constantes import ARG_BUS
+
+        if not self._disp_montado:
+            self._error("escribir_dispositivo: dispositivo no montado")
+            return False
+        if valor == ARG_BUS and not self._bus_valido:
+            self._error("escribir_dispositivo: bus vacío")
+            return False
+        v = self._resolver(valor, self._bus_valor)
+        if not self._es_token_valido(v):
+            self._error("escribir_dispositivo: token inválido")
+            return False
+        if not self._escribir_dispositivo_interno(self._disp_puntero, v):
+            self._error("escribir_dispositivo: rechazado por el dispositivo")
+            return False
+        self._escrituras_disp += 1
+        self._disp_trazado.append(
+            (self._paso, "escritura", self._disp_puntero, v)
+        )
+        self._evento(f"escribir_dispositivo[{self._disp_puntero}] <- {v}")
+        return True
+
+    def panel_trazado_dispositivo(self) -> list:
+        """Últimas entradas del trazado I/O formateadas (monitor/demo)."""
+        ultimas = list(self._disp_trazado)[-TRAZADO_DISPOSITIVO_PANEL:]
+        lineas = [formatear_trazado_dispositivo(e) for e in ultimas]
+        lineas += [""] * (TRAZADO_DISPOSITIVO_PANEL - len(lineas))
+        return lineas
 
     # --------------------------------------------------
     # observación
@@ -687,10 +825,14 @@ class MaquinaBase(InterfazPrimitivas):
             registro=tuple(self._registro),
             dispositivo_conectado=self._disp_conectado,
             dispositivo_montado=self._disp_montado,
+            dispositivo_puntero=self._disp_puntero,
+            dispositivo_ranuras=tuple(self._disp_ranuras),
+            dispositivo_trazado=tuple(self._disp_trazado),
             ultimo_error=self._ultimo_error,
             ultimo_evento=self._ultimo_evento,
             escrituras_disco=self._escrituras_disco,
             escrituras_memoria=self._escrituras_memoria,
+            escrituras_dispositivo=self._escrituras_disp,
             usos_gpu=self._usos_gpu,
             teclado_leidos=tuple(self._teclado_leidos),
         )
@@ -701,6 +843,12 @@ class MaquinaBase(InterfazPrimitivas):
 
     def _escribir_disco_interno(self, direccion: int, token: int) -> bool:
         self._disco[direccion] = token
+        return True
+
+    # gancho de persistencia del pendrive (Fase 1.5): PCReal lo
+    # sobreescribe para respaldar la ranura en el sandbox real
+    def _escribir_dispositivo_interno(self, direccion: int, token: int) -> bool:
+        self._disp_ranuras[direccion] = token
         return True
 
     # señalización interna

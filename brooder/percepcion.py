@@ -11,7 +11,7 @@ La usan, sin excepción:
 Gracias a eso, la política entrenada percibe exactamente lo mismo
 que la política desplegada: cero desajuste de distribución.
 
-Diseño del vector (OBS_DIM = 24):
+Diseño del vector (OBS_DIM = 26):
 
   [0..4]    tarea clásica, one-hot (canal de control del cargador).
             La tarea DISPOSITIVO NO usa el one-hot: su canal vive al
@@ -38,10 +38,17 @@ Diseño del vector (OBS_DIM = 24):
   [21]      1.0 si la solicitud es de dispositivo (Fase 1)
   [22]      1.0 si hay pendrive en el conector USB
   [23]      1.0 si el pendrive está montado
+  [24]      puntero del pendrive / 7 (Fase 1.5: direccionamiento del
+            almacenamiento del dispositivo; la ranura se normaliza
+            por N_RANURAS_DISPOSITIVO-1, como cabezal/puntero)
+  [25]      1.0 si ya se escribió en el pendrive en esta solicitud
+            (Fase 1.5: espejo de los canales 19/20 para el medio
+            extraíble)
 """
 from __future__ import annotations
 
 from brooder.constantes import (
+    N_RANURAS_DISPOSITIVO,
     N_TAREAS_CLASICAS,
     Tarea,
 )
@@ -85,6 +92,11 @@ def construir_observacion(
     obs.append(1.0 if tarea == Tarea.DISPOSITIVO else 0.0)        # [21]
     obs.append(1.0 if instante.dispositivo_conectado else 0.0)   # [22]
     obs.append(1.0 if instante.dispositivo_montado else 0.0)     # [23]
+    # --- Fase 1.5: almacenamiento del dispositivo --------------------
+    obs.append(
+        instante.dispositivo_puntero / (N_RANURAS_DISPOSITIVO - 1)
+    )                                                            # [24]
+    obs.append(1.0 if instante.escrituras_dispositivo else 0.0)  # [25]
     return obs
 
 
@@ -111,5 +123,7 @@ def nombre_de_canales() -> list:
         "disp_tarea",
         "disp_conectado",
         "disp_montado",
+        "disp_puntero",
+        "disp_escrituras",
     ]
     return nombres

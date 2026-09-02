@@ -339,12 +339,37 @@ a legacy-contract brain (21×18) mounted on a kernel that speaks 24×20.
 Booting is LEGAL — prefix compatibility guarantees it — but `montar`
 failed in silence: the brain's heads never emit ids ≥ n_primitivas.
 Now the POST declares the mounted contract (`[ OK ] Cerebro contrato
-24x20` / `[ AVISO ] … (imagen antigua)`), and `arrancar`, `demo` and
+26x23` / `[ AVISO ] … (imagen antigua)`), and `arrancar`, `demo` and
 `diagnostico` explain the mismatch and its remedy before the first
 [FALLO] appears. As a bonus, `rojo_local` was repaired: it had been
 missing since the first commit, and `brooder diagnostico` crashed the
 moment a task fell below 85 % (the ✘ branch had never run until then).
 Suite: 112/112 (106 + 6 new tests in `tests/test_contrato.py`).
+
+**Fase 1.5 — real storage: the pendrive remembers.** The mounted
+pendrive is no longer a hollow object: it gains its own data plane
+(primitives 20/21/22 — move pointer, read and write against its 8
+slots —, a mirror of the disk/RAM pair and **only usable with the
+device mounted**, like a real USB) and its **own I/O trace**: every
+read/write leaves an entry in the medium's own ring
+(`[0010] E ranura[3] <- 'Q'`), separate from the kernel's dmesg. The
+slots live ON the device: they survive unmounting and the world
+pulling the pendrive out and plugging it back (safe extraction) — **
+the pendrive remembers** what was written to it — and are lost on
+unsafe extraction, like an unsynchronized buffer on a physical USB.
+In `--maquina-real` the pendrive is the file
+`brooder_sandbox/pendrive.json`: what is written there **survives
+shutting the AI-OS down and booting it again**. The DISPOSITIVO task
+debuts the `escribir 3 P` / `leer 3 P` modes with hardware-verifiable,
+cheat-proof success (in `leer`, the value never goes through the
+keyboard: the only source is the medium itself). The space between
+number and letter is optional — `leer 3P` is the same request as
+`leer 3 P`, just as `3+5` already was for sums (field hotfix after
+the first real session). Contract: 24×20 →
+**26×23** (prefix compatibility and the hotfix's contract guardian
+cover it: a Fase 1 brain boots and gets its warning with the exact
+missing pieces). Suite: **137/137** (112 + 23 from the phase + 2 from
+the parser hotfix, in `tests/test_almacenamiento.py`).
 
 The **data bus** is the heart of the design: data primitives only accept
 the value that has already been read onto the bus. You cannot "show"
@@ -377,7 +402,7 @@ Verify the shipped image before booting it:
 
 ```bash
 sha256sum ssd/brooder.img
-# 1def9990587f935d2dbc019ee4797610725d81bfff66063cd12d21c6509dd62b  brooder.img
+# 5e9e66cbfa9679c7d62eaf3bfc8537fa22fbd3c138227110fadee5236d6b3590  brooder.img
 ```
 
 *(Update that digest if you regenerate the image with `brooder
@@ -478,9 +503,12 @@ pytest -q   # 43 tests: primitives, environment, oracle, brain, kernel, SSD, san
       brain traces on its own.~~
 - [x] ~~Fase 1: external hot-plug device (virtual pendrive,
       `montar`/`desmontar`).~~
-- [ ] Real storage on the mounted pendrive: read/write device data
-      once accepted (Fase 1.5).
+- [x] ~~Fase 1.5: real storage on the mounted pendrive —
+      `escribir`/`leer` device data with its own I/O trace, real
+      persistence and unsafe extraction losing data.~~
 - [ ] More tokens and multi-line screens; screen editing.
+- [ ] A minimal pendrive "file system" (multiple tokens per slot,
+      checksum) — the natural step after flat slots.
 - [ ] New tasks over the existing primitives: SUBTRACTION, file chains,
       disk search, periodic alarms.
 - [ ] Network enabled with real packets (another input source).

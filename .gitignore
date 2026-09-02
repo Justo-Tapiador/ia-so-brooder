@@ -20,3 +20,6 @@ brooder_sandbox_demo/
 
 # No es distribución npm
 package.json
+
+# Fase 1.5: artefactos de la reencubación local
+entrenamiento-fase15/

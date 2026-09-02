@@ -55,7 +55,8 @@ def expandir_estado_contrato(
     """"Trasplante": cerebro del contrato viejo -> contrato actual.
 
     Extiende los tensores que cambian de forma cuando el contrato
-    crece (Fase 1: percepción 21 -> 24 y primitivas 18 -> 20):
+    crece (Fase 1: percepción 21 -> 24 y primitivas 18 -> 20; Fase
+    1.5: 24 -> 26 y 20 -> 23 — la misma mecánica):
 
     * ``codificador.0.weight``: las columnas nuevas (canales de
       percepción) se añaden a CERO. Con los canales nuevos en 0.0 —
@@ -498,10 +499,18 @@ class Incubadora:
         que el currículo introduce GUARDAR/RECORDAR, la convergencia
         exige además declarar esa I/O: una incubación "completa"
         produce un cerebro que resuelve Y traza.
+
+        Fase 1.5: la tarea DISPOSITIVO se suma cuando tuvo operaciones
+        trazables (sus modos escribir/leer dejan I/O en el pendrive;
+        en los modos de ciclo de vida no hay nada que declarar, así
+        que la métrica simplemente no aparece y no lo exige).
         """
         if not self._etapa_con_almacenamiento():
             return True
-        for tarea in ("GUARDAR", "RECORDAR"):
+        exigidas = ["GUARDAR", "RECORDAR"]
+        if "DISPOSITIVO" in trazado_eval:
+            exigidas.append("DISPOSITIVO")
+        for tarea in exigidas:
             if trazado_eval.get(tarea, 0.0) < self.cfg.umbral_trazado:
                 return False
         return True
@@ -641,12 +650,14 @@ class Incubadora:
                 # semilla debe existir en la política DETERMINISTA:
                 # medirla con la política estocástica es engañoso (la
                 # entropía diluye el muestreo y subestima lo que el
-                # argmax ya sabe hacer).
+                # argmax ya sabe hacer). Fase 1.5: DISPOSITIVO entra
+                # en la lista cuando dejó I/O trazable en la eval.
                 self._trazado_explorar = (
                     self._etapa_con_almacenamiento()
                     and any(
                         trazado_eval.get(t, 0.0) < self.cfg.umbral_exploracion_trazado
-                        for t in ("GUARDAR", "RECORDAR")
+                        for t in ("GUARDAR", "RECORDAR", "DISPOSITIVO")
+                        if t in trazado_eval
                     )
                 )
                 tareas_vistas = CURRICULO[self.etapa]
@@ -713,8 +724,8 @@ class Incubadora:
                             "aún no está integrado ("
                             + " | ".join(
                                 f"{t} {trazado_eval.get(t, 0.0):.0%}"
-                                for t in ("GUARDAR", "RECORDAR")
-                                if t in trazado_eval or self._etapa_con_almacenamiento()
+                                for t in ("GUARDAR", "RECORDAR", "DISPOSITIVO")
+                                if t in trazado_eval
                             )
                             + "). Entropía de exploración activa."
                         )

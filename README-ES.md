@@ -115,6 +115,10 @@ brooder arrancar
 #   brooder> guardar 4 G     <- escribe 'G' en la ranura 4 del disco y la recupera
 #   brooder> recordar 2 Z    <- igual, pero en RAM
 #   brooder> aviso A         <- muestra 'A' y pita al leer la alarma
+#   brooder> :pendrive       <- enchufa el pendrive (hot-plug del mundo)
+#   brooder> montar          <- la IA monta el pendrive del conector
+#   brooder> escribir 3 P    <- guarda 'P' en la ranura 3 del pendrive y la recupera
+#   brooder> desmontar       <- extracción segura (el dato viaja con el medio)
 #   brooder> :recovery       <- menú de emergencia, independiente de la IA
 
 # (opcional) incubar tu propio cerebro y arrancarlo
@@ -339,13 +343,38 @@ deja montado un cerebro del contrato viejo (21×18) en un kernel que
 habla 24×20. El arranque es LEGAL —la compatibilidad de prefijo lo
 garantiza— pero `montar` fallaba en silencio: las cabezas del cerebro
 nunca emiten ids ≥ n_primitivas. Ahora el POST declara el contrato
-montado (`[ OK ] Cerebro contrato 24x20` / `[ AVISO ] … (imagen
+montado (`[ OK ] Cerebro contrato 26x23` / `[ AVISO ] … (imagen
 antigua)`), y `arrancar`, `demo` y `diagnostico` explican el desfase y
 su remedio antes de que aparezca el primer [FALLO]. De regalo, se
 reparó `rojo_local`: faltaba desde el primer commit y
 `brooder diagnostico` crasheaba en cuanto una tarea caía por debajo
 del 85 % (rama ✘ nunca ejecutada hasta entonces). Suite: 112/112
 (106 + 6 tests nuevos en `tests/test_contrato.py`).
+
+**Fase 1.5 — almacenamiento real: el pendrive recuerda.** El
+pendrive montado deja de ser un objeto hueco: gana un plano de datos
+propio (primitivas 20/21/22 — mover puntero, leer y escribir contra
+sus 8 ranuras —, espejo del par disco/RAM y **solo utilizable con el
+dispositivo montado**, como un USB real) y un **trazado I/O propio**:
+cada lectura/escritura deja su entrada en el anillo del propio medio
+(`[0010] E ranura[3] <- 'Q'`), separado del dmesg del kernel. Las
+ranuras viven EN EL DISPOSITIVO: sobreviven a desmontar y a que el
+mundo retire y reenchufe el pendrive (extracción segura) — **el
+pendrive recuerda** lo que se escribió en él — y se pierden con la
+extracción insegura, como el búfer sin sincronizar de un USB físico.
+En `--maquina-real` el pendrive es el archivo
+`brooder_sandbox/pendrive.json`: lo que se escribe ahí **sobrevive a
+apagar la IA-SO y volver a encenderla**. La tarea DISPOSITIVO estrena
+los modos `escribir 3 P` / `leer 3 P` con éxito verificable y a prueba
+de adivinanzas (en `leer`, el valor nunca pasa por el teclado: la
+única fuente es el propio medio). El espacio entre número y letra es
+opcional — `leer 3P` es la misma solicitud que `leer 3 P`, como `3+5`
+ya lo era para la suma (hotfix de campo tras la primera sesión real).
+Contrato: 24×20 → **26×23** (la
+compatibilidad de prefijo y el guardián de contrato del hotfix lo
+cubren: un cerebro Fase 1 arranca y recibe su AVISO con las faltas
+exactas). Suite: **137/137** (112 + 23 de la fase + 2 del hotfix del
+parser, en `tests/test_almacenamiento.py`).
 
 El **bus de datos** es el corazón del diseño: las primitivas de datos
 solo aceptan el valor que ya ha sido leído en el bus. No se puede
@@ -379,7 +408,7 @@ Verifica la imagen antes de arrancarla:
 
 ```bash
 sha256sum ssd/brooder.img
-# 1def9990587f935d2dbc019ee4797610725d81bfff66063cd12d21c6509dd62b  brooder.img
+# 5e9e66cbfa9679c7d62eaf3bfc8537fa22fbd3c138227110fadee5236d6b3590  brooder.img
 ```
 
 *(Actualiza ese hash si regeneras la imagen con `brooder exportar`;
@@ -467,7 +496,8 @@ solicitudes aleatorias. Si el entorno estuviera mal construido, el
 oráculo fallaría y el test lo delataría.
 
 ```bash
-pytest -q   # 43 tests: primitivas, entorno, oráculo, cerebro, núcleo, SSD, sandbox
+pytest -q   # 137 tests: primitivas, entorno, oráculo, cerebro, núcleo,
+            # SSD, sandbox, dispositivo y su almacenamiento real
 ```
 
 ---
@@ -478,9 +508,12 @@ pytest -q   # 43 tests: primitivas, entorno, oráculo, cerebro, núcleo, SSD, sa
       cerebro traza por decisión propia.~~
 - [x] ~~Fase 1: dispositivo externo con hot-plug (pendrive virtual,
       `montar`/`desmontar`).~~
-- [ ] Almacenamiento real en el pendrive montado: leer/escribir datos
-      del dispositivo una vez aceptado (Fase 1.5).
+- [x] ~~Fase 1.5: almacenamiento real en el pendrive montado —
+      `escribir`/`leer` datos del dispositivo con trazado I/O propio,
+      persistencia real y extracción insegura que pierde datos.~~
 - [ ] Más tokens y pantallas de varias líneas; edición de pantalla.
+- [ ] Un «sistema de archivos» mínimo del pendrive (múltiples tokens por
+      ranura, checksum), el paso natural tras las ranuras planas.
 - [ ] Tareas nuevas sobre las primitivas existentes: RESTA, cadenas de
       archivos, búsqueda en disco, alarmas periódicas.
 - [ ] Red activada con paquetes reales (otra fuente de entrada).
