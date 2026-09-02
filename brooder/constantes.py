@@ -489,5 +489,5 @@ ACCION_DIM_ARGUMENTO = N_ARGUMENTOS
 # 6. IDENTIDAD DEL PROYECTO
 # ============================================================
 NOMBRE_PROYECTO = "IA-SO Brooder"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 ESLOGAN = "un sistema operativo que se incuba, no se instala"
