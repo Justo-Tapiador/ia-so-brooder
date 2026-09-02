@@ -29,15 +29,15 @@ English version: **[README.md](README.md)**
 1. [¿Qué es esto?](#qué-es-esto)
 2. [Resultados](#resultados)
 3. [Arranque rápido](#arranque-rápido)
-4. [El SSD de nacimiento: hardware recomendado](#el-ssd-de-nacimiento-hardware-recomendado)
-5. [Seguridad: primitivas, no hardware](#seguridad-primitivas-no-hardware)
-6. [Arquitectura](#arquitectura)
-7. [Cómo aprende Brooder](#cómo-aprende-brooder)
-8. [Hoja de ruta](#hoja-de-ruta)
-9. [Autores y reconocimiento](#autores-y-reconocimiento)
-10. [Licencia](#licencia)
+4. [El emulador web — la IA-SO en el navegador](#el-emulador-web--la-ia-so-en-el-navegador)
+5. [El SSD de nacimiento: hardware recomendado](#el-ssd-de-nacimiento-hardware-recomendado)
+6. [Seguridad: primitivas, no hardware](#seguridad-primitivas-no-hardware)
+7. [Arquitectura](#arquitectura)
+8. [Cómo aprende Brooder](#cómo-aprende-brooder)
+9. [Hoja de ruta](#hoja-de-ruta)
+10. [Autores y reconocimiento](#autores-y-reconocimiento)
+11. [Licencia](#licencia)
 
----
 
 ## ¿Qué es esto?
 
@@ -151,6 +151,42 @@ $env:PYTHONUTF8 = "1"
 Unicode de la consola y no necesita nada.)
 
 ---
+
+## El emulador web — la IA-SO en el navegador
+
+Sin máquina donde conectar la imagen SSD, o con ganas de enseñar el
+proyecto desde cualquier dispositivo: el repo incluye un **emulador
+web** que sirve la MISMA consola de máquina real en el navegador.
+
+```bash
+brooder servidor                      # desde la raíz del repo
+# Consola lista: http://127.0.0.1:7800/
+```
+
+```bash
+brooder> (en el navegador, con el POST animado, el prompt cian y los
+          mismos veredictos [ OK ]/[FALLO] que en el terminal)
+```
+
+* **Idéntica por construcción**: la sesión vive en `brooder/sesion.py`
+  y la comparten el CLI y el servidor — no hay dos consolas que
+  desincronizarse. El test de equivalencia lo certifica byte a byte.
+* **100 % stdlib** (`http.server` + `json` + `threading`): cero
+  dependencias nuevas.
+* **`config.json`** en la raíz: perfil de la máquina emulada (A·PC
+  reciclado 80×25 con POST perezoso, B·equilibrado, C·incubadora con
+  panel de métricas, D·SSD viajero), tamaño del monitor, tema del CRT,
+  máquina virtual o real (con `real`, **el pendrive recuerda entre
+  apagados también desde el navegador**) e imagen SSD a montar —
+  apuntando a `ssd/brooder-fase0.img` se ve al guardián de contrato
+  arrancar el cerebro de la Fase 0 sobre la placa actual.
+* **Seguridad de siempre**: escucha solo en `127.0.0.1` por defecto
+  (como el «Red desactivada por seguridad» del POST); exponerlo a la
+  LAN es decisión explícita y se anuncia con alerta.
+
+Ver [docs/servidor-web.md](docs/servidor-web.md) para la referencia
+completa del `config.json`, la API JSON y los límites honestos
+(sesión única, recovery por líneas).
 
 ## El SSD de nacimiento: hardware recomendado
 

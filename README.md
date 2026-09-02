@@ -29,15 +29,15 @@ Versión en español: **[README-ES.md](README-ES.md)**
 1. [What is this?](#what-is-this)
 2. [Results](#results)
 3. [Quick start](#quick-start)
-4. [The birth SSD: recommended hardware](#the-birth-ssd-recommended-hardware)
-5. [Security: primitives, not hardware](#security-primitives-not-hardware)
-6. [Architecture](#architecture)
-7. [How Brooder learns](#how-brooder-learns)
-8. [Roadmap](#roadmap)
-9. [Authors and acknowledgements](#authors-and-acknowledgements)
-10. [License](#license)
+4. [The web emulator — IA-SO in your browser](#the-web-emulator--ia-so-in-your-browser)
+5. [The birth SSD: recommended hardware](#the-birth-ssd-recommended-hardware)
+6. [Security: primitives, not hardware](#security-primitives-not-hardware)
+7. [Architecture](#architecture)
+8. [How Brooder learns](#how-brooder-learns)
+9. [Roadmap](#roadmap)
+10. [Authors and acknowledgements](#authors-and-acknowledgements)
+11. [License](#license)
 
----
 
 ## What is this?
 
@@ -148,6 +148,42 @@ $env:PYTHONUTF8 = "1"
 Unicode API and needs nothing.)
 
 ---
+
+## The web emulator — IA-SO in your browser
+
+No machine to plug the SSD image into, or want to show the project from
+any device: the repo ships a **web emulator** that serves the SAME
+real-machine console in the browser.
+
+```bash
+brooder servidor                      # from the repo root
+# Consola lista: http://127.0.0.1:7800/
+```
+
+```bash
+brooder> (in the browser: animated POST, cyan prompt and the very same
+          [ OK ]/[FALLO] verdicts you get in the terminal)
+```
+
+* **Identical by construction**: the session lives in `brooder/sesion.py`
+  and is shared by the CLI and the server — there are not two consoles
+  to drift apart. The byte-equivalence test certifies it.
+* **100 % stdlib** (`http.server` + `json` + `threading`): zero new
+  dependencies.
+* **`config.json`** at the repo root: emulated machine profile (A·recycled
+  PC 80×25 with a lazy POST, B·balanced, C·incubator with metrics panel,
+  D·travelling SSD), monitor size, CRT theme, virtual or real machine
+  (with `real`, **the pendrive remembers across power-offs right from
+  the browser**) and which SSD image to mount — point it at
+  `ssd/brooder-fase0.img` to watch the contract guardian boot the
+  Phase-0 brain on the current board.
+* **Security as always**: listens on `127.0.0.1` only by default (like
+  the POST's "network disabled for security"); exposing it to the LAN
+  is an explicit decision, announced with a red alert.
+
+See [docs/servidor-web.md](docs/servidor-web.md) (Spanish) for the full
+`config.json` reference, the JSON API and the honest limits (single
+session, line-based recovery).
 
 ## The birth SSD: recommended hardware
 

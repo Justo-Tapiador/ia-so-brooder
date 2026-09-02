@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IA-SO Brooder · Emulador web</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23061314'/%3E%3Ctext x='8' y='12' font-size='10' text-anchor='middle' fill='%237ee7ff' font-family='monospace'%3EB%3C/text%3E%3C/svg%3E">
+<style>
+  /* ============ temas ============ */
+  body.tema-cian  { --fondo:#040d10; --panel:#061316; --texto:#a8e6f0; --brillo:#7ee7ff;
+                    --ok:#8affc1; --fallo:#ff8a8a; --aviso:#ffd27a; --tenue:#5a8a93; }
+  body.tema-verde { --fondo:#050d06; --panel:#061208; --texto:#b8f5c0; --brillo:#7dff8a;
+                    --ok:#7dff8a; --fallo:#ff8a8a; --aviso:#ffd27a; --tenue:#5a9360; }
+  body.tema-ambar { --fondo:#0f0a04; --panel:#140d05; --texto:#f5dfae; --brillo:#ffd27a;
+                    --ok:#ffd27a; --fallo:#ff8a8a; --aviso:#ffb36a; --tenue:#93714a; }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--fondo); color: var(--texto);
+    font-family: "Cascadia Mono", Consolas, "DejaVu Sans Mono", "Courier New", monospace;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ============ cabecera ============ */
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--tenue);
+    background: linear-gradient(180deg, var(--panel), var(--fondo));
+  }
+  .marca { font-weight: bold; color: var(--brillo); letter-spacing: 1px; }
+  .marca small { color: var(--tenue); font-weight: normal; }
+  .meta { color: var(--tenue); font-size: 12px; }
+  .meta b { color: var(--texto); font-weight: normal; }
+  #boton-power {
+    margin-left: auto; cursor: pointer; border: 1px solid var(--tenue);
+    background: transparent; color: var(--aviso); font-family: inherit;
+    font-size: 13px; padding: 6px 14px; border-radius: 4px;
+    transition: all .15s ease; letter-spacing: 1px;
+  }
+  #boton-power:hover { border-color: var(--brillo); color: var(--brillo); }
+  #boton-power.encendida {
+    color: var(--ok); border-color: var(--ok);
+    box-shadow: 0 0 8px -2px var(--ok);
+  }
+  #boton-power:disabled { opacity: .5; cursor: wait; }
+
+  /* ============ cuerpo ============ */
+  main { flex: 1; display: flex; min-height: 0; }
+  #zona-terminal {
+    flex: 1; display: flex; flex-direction: column; min-width: 0;
+    background: var(--panel);
+    border-right: 1px solid var(--tenue);
+    position: relative;
+  }
+  /* efecto CRT: líneas de barrido sutiles */
+  #zona-terminal::after {
+    content: ""; position: absolute; pointer-events: none; inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent 0 2px, rgba(0,0,0,.14) 2px 4px);
+    mix-blend-mode: multiply;
+  }
+  #terminal {
+    position: relative; flex: 1; overflow-y: auto; padding: 10px 14px 4px;
+    font-size: 13px; line-height: 1.45; white-space: pre-wrap;
+    word-break: break-all; text-shadow: 0 0 4px rgba(126,231,255,.12);
+  }
+  .linea { min-height: 1.45em; }
+
+  /* colores ANSI */
+  .c  { color: var(--brillo); }
+  .v  { color: var(--ok); }
+  .r  { color: var(--fallo); }
+  .y  { color: var(--aviso); }
+  .d  { color: var(--tenue); }
+  .b  { font-weight: bold; }
+
+  /* ============ entrada ============ */
+  #zona-entrada {
+    display: flex; align-items: center; gap: 0; padding: 6px 14px 10px;
+    border-top: 1px dashed color-mix(in srgb, var(--tenue) 55%, transparent);
+    position: relative;
+  }
+  #prompt { color: var(--brillo); white-space: pre; user-select: none; }
+  #comando {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: var(--texto); font: inherit; caret-color: var(--brillo);
+  }
+  #zona-entrada.apagada { opacity: .45; }
+  #zona-entrada.apagada #comando { pointer-events: none; }
+
+  /* ============ panel lateral ============ */
+  #panel-lateral {
+    width: 300px; flex-shrink: 0; overflow-y: auto; padding: 12px;
+    background: color-mix(in srgb, var(--panel) 60%, var(--fondo));
+    font-size: 12px; line-height: 1.5;
+  }
+  #panel-lateral.oculto { display: none; }
+  .caja {
+    border: 1px solid var(--tenue); border-radius: 4px;
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .caja h3 {
+    margin: 0; padding: 5px 10px; font-size: 11px; letter-spacing: 1px;
+    color: var(--brillo); background: color-mix(in srgb, var(--tenue) 18%, transparent);
+    font-weight: bold;
+  }
+  .caja dl { margin: 0; padding: 6px 10px; }
+  .caja dt { color: var(--tenue); float: left; clear: left; width: 118px; }
+  .caja dd { margin: 0 0 2px 122px; word-break: break-all; color: var(--texto); }
+  .caja .vacio { color: var(--tenue); padding: 6px 10px; display: block; }
+
+  /* ============ pie ============ */
+  footer {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+    padding: 5px 16px; border-top: 1px solid var(--tenue);
+    color: var(--tenue); font-size: 11px;
+  }
+  #pill-estado {
+    border: 1px solid var(--tenue); border-radius: 8px; padding: 1px 10px;
+  }
+  #pill-estado.on { color: var(--ok); border-color: var(--ok); }
+
+  /* ============ móvil ============ */
+  @media (max-width: 860px) {
+    main { flex-direction: column; overflow-y: auto; }
+    #zona-terminal { min-height: 62vh; border-right: none;
+                     border-bottom: 1px solid var(--tenue); }
+    #panel-lateral { width: auto; }
+  }
+</style>
+</head>
+<body class="tema-cian">
+
+<header>
+  <div class="marca">IA-SO BROODER <small>· EMULADOR WEB</small></div>
+  <div class="meta" id="meta-perfil">cargando…</div>
+  <button id="boton-power" type="button">&#9211; ARRANCAR</button>
+</header>
+
+<main>
+  <section id="zona-terminal">
+    <div id="terminal"></div>
+    <div id="zona-entrada" class="apagada">
+      <span id="prompt">brooder&gt; </span>
+      <input id="comando" autocomplete="off" spellcheck="false"
+             aria-label="línea para la consola de Brooder" disabled>
+    </div>
+  </section>
+
+  <aside id="panel-lateral">
+    <div class="caja">
+      <h3>MONITOR DEL SISTEMA</h3>
+      <dl id="monitor-dl"><dd class="vacio">máquina apagada</dd></dl>
+    </div>
+    <div class="caja" id="caja-metricas" style="display:none">
+      <h3>CEREBRO (SSD)</h3>
+      <dl id="metricas-dl"></dl>
+    </div>
+    <div class="caja">
+      <h3>EMULADOR</h3>
+      <dl id="emulador-dl"></dl>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span id="pill-estado">APAGADA</span>
+  <span id="pie-info"></span>
+  <span style="margin-left:auto">sesión única · red desactivada por seguridad</span>
+</footer>
+
+<script>
+"use strict";
+
+/* ============ estado de la consola ============ */
+let config = null;
+let encendida = false;
+let modo = "normal";           // "normal" | "recovery"
+let animando = false;          // POST en marcha
+const historial = [];
+let idxHistorial = -1;
+
+const $ = (id) => document.getElementById(id);
+const terminal = $("terminal");
+const comando = $("comando");
+const prompt = $("prompt");
+const zonaEntrada = $("zona-entrada");
+const botonPower = $("boton-power");
+
+/* ============ ANSI → HTML ============ */
+/* El render de pantalla.py emite SGR (\x1b[1m…) y, por su función c(),
+   cierra cada color con un ESC suelto. Aquí se traduce:
+   - \x1b[0m … reset            \x1b[1m negrita      \x1b[2m tenue
+   - 31/32/33/36 → rojo/verde/amarillo/cian
+   - ESC suelto  → cierre de estilo
+   - \x1b[2J     → limpiar la pantalla
+*/
+const CLASES_ANSI = {
+  "1": "b", "2": "d",
+  "31": "r", "32": "v", "33": "y", "36": "c",
+};
+
+function escaparHtml(texto) {
+  return texto.replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;");
+}
+
+function ansiAHtml(texto) {
+  // ESC suelto (no seguido de '[') = cierre del estilo actual
+  let s = texto.replace(/\x1b(?!\[)/g, "\x1b[0m");
+  // limpiar pantalla: se trata fuera (línea completa)
+  s = s.replace(/\x1b\[2J\x1b\[H|\x1b\[2J|\x1b\[H/g, "");
+  const re = /\x1b\[([0-9;]*)m/g;
+  let html = "";
+  let ultimo = 0;
+  const clases = new Set();
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    html += volcar(s.slice(ultimo, m.index), clases);
+    ultimo = m.index + m[0].length;
+    for (const codigo of m[1].split(";")) {
+      if (codigo === "" || codigo === "0") clases.clear();
+      else if (CLASES_ANSI[codigo]) clases.add(CLASES_ANSI[codigo]);
+    }
+  }
+  html += volcar(s.slice(ultimo), clases);
+  return html;
+}
+
+function volcar(fragmento, clases) {
+  if (!fragmento) return "";
+  const cls = [...clases].join(" ");
+  return cls ? `<span class="${cls}">${escaparHtml(fragmento)}</span>`
+             : escaparHtml(fragmento);
+}
+
+/* ============ render de líneas ============ */
+function escribirLinea(texto) {
+  if (/^\s*\x1b\[2J/.test(texto)) { terminal.innerHTML = ""; return; }
+  const div = document.createElement("div");
+  div.className = "linea";
+  div.innerHTML = ansiAHtml(texto);
+  terminal.appendChild(div);
+  terminal.scrollTop = terminal.scrollHeight;
+}
+
+function escribirLineas(lineas, retardoMs) {
+  return new Promise((resolver) => {
+    let i = 0;
+    const paso = () => {
+      if (i >= lineas.length) { resolver(); return; }
+      escribirLinea(lineas[i++]);
+      if (retardoMs > 0 && !saltar) setTimeout(paso, retardoMs);
+      else paso();
+    };
+    if (lineas.length === 0) { resolver(); return; }
+    paso();
+  });
+}
+
+/* clic durante el POST: completa la animación al instante */
+let saltar = false;
+terminal.addEventListener("click", () => { saltar = true; comando.focus(); });
+
+/* ============ API ============ */
+async function pedir(ruta, cuerpo) {
+  const opciones = cuerpo === undefined
+    ? {}
+    : {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo),
+      };
+  const respuesta = await fetch(ruta, opciones);
+  return respuesta.json();
+}
+
+/* ============ interfaz ============ */
+function actualizarUi(estado) {
+  encendida = estado.encendida;
+  modo = estado.modo || "normal";
+  botonPower.classList.toggle("encendida", encendida);
+  botonPower.innerHTML = encendida ? "&#9211; APAGAR" : "&#9211; ARRANCAR";
+  zonaEntrada.classList.toggle("apagada", !encendida || animando);
+  comando.disabled = !encendida || animando;
+  prompt.textContent = modo === "recovery" ? "  Elige una opción> " : "brooder> ";
+  const pill = $("pill-estado");
+  pill.textContent = encendida ? "ENCENDIDA" : "APAGADA";
+  pill.classList.toggle("on", encendida);
+  if (encendida && estado.resumen) {
+    pill.textContent += " · " + estado.resumen;
+  }
+  pintarMonitor(estado);
+  if (encendida && !animando) comando.focus();
+}
+
+function parClaveValor(dl, pares) {
+  dl.innerHTML = "";
+  for (const [clave, valor] of pares) {
+    if (valor === undefined || valor === null || valor === "") continue;
+    const dt = document.createElement("dt"); dt.textContent = clave;
+    const dd = document.createElement("dd"); dd.textContent = valor;
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+}
+
+function pintarMonitor(estado) {
+  const dl = $("monitor-dl");
+  const panel = estado.panel;
+  if (!panel) {
+    dl.innerHTML = '<dd class="vacio">máquina apagada</dd>';
+    return;
+  }
+  const disp = panel.dispositivos || {};
+  const trazado = (disp.trazado_io_pendrive || []).slice(-4).join("  |  ");
+  parClaveValor(dl, [
+    ["Sistema", panel.estado_sistema],
+    ["Arranques", String(panel.arranques ?? "-")],
+    ["CPU acumulador", String(disp.acumulador)],
+    ["Pantalla", disp.pantalla],
+    ["RAM", disp.ram],
+    ["Disco", disp.disco],
+    ["Pendrive", disp.pendrive],
+    ["E/S pendrive", trazado || "-"],
+    ["Teclado pend.", String(disp.teclado_pendiente)],
+    ["Último error", disp.ultimo_error],
+  ]);
+}
+
+function pintarMetricas(metricas) {
+  const caja = $("caja-metricas");
+  if (!config || !config.consola.metricas) { caja.style.display = "none"; return; }
+  const pares = [];
+  for (const [tarea, valor] of Object.entries(metricas?.exito || {}))
+    pares.push([`éxito ${tarea}`, `${Math.round(valor * 100)} %`]);
+  for (const [tarea, valor] of Object.entries(metricas?.trazado || {}))
+    pares.push([`trazado ${tarea}`, `${Math.round(valor * 100)} %`]);
+  if (!pares.length) return;
+  caja.style.display = "";
+  parClaveValor($("metricas-dl"), pares);
+}
+
+/* ============ arranque / líneas / apagado ============ */
+async function arrancar() {
+  if (animando || encendida) return;
+  animando = true; saltar = false;
+  botonPower.disabled = true;
+  actualizarUi({ encendida: false });
+  const estado = await pedir("/api/arrancar", {});
+  await escribirLineas(estado.lineas || [], (config?.consola.retardo_post_ms) ?? 0);
+  animando = false; botonPower.disabled = false;
+  await refrescarEstado();
+}
+
+async function enviarLinea(texto) {
+  // eco local: lo que el usuario tecleó, como en un terminal de verdad
+  escribirLinea(prompt.textContent + texto);
+  const estado = await pedir("/api/linea", { texto });
+  await escribirLineas(estado.lineas || [], 0);
+  actualizarUi(estado);
+  pintarMetricas(estado.metricas);
+}
+
+async function apagarPorBoton() {
+  if (animando || !encendida) return;
+  const estado = await pedir("/api/apagar", {});
+  await escribirLineas(estado.lineas || [], 0);
+  actualizarUi(estado);
+}
+
+async function refrescarEstado() {
+  const estado = await pedir("/api/estado");
+  actualizarUi(estado);
+  pintarMetricas(estado.metricas);
+}
+
+/* ============ eventos ============ */
+botonPower.addEventListener("click", () => {
+  if (encendida) apagarPorBoton(); else arrancar();
+});
+
+comando.addEventListener("keydown", (evento) => {
+  if (evento.key === "Enter") {
+    const texto = comando.value;
+    comando.value = "";
+    if (!texto.trim()) return;
+    historial.push(texto);
+    idxHistorial = historial.length;
+    enviarLinea(texto);
+  } else if (evento.key === "ArrowUp") {
+    if (idxHistorial > 0) comando.value = historial[--idxHistorial];
+    evento.preventDefault();
+  } else if (evento.key === "ArrowDown") {
+    if (idxHistorial < historial.length - 1) comando.value = historial[++idxHistorial];
+    else { idxHistorial = historial.length; comando.value = ""; }
+    evento.preventDefault();
+  }
+});
+
+/* ============ arranque de la página ============ */
+(async function inicial() {
+  try {
+    config = await pedir("/api/config");
+  } catch {
+    config = { consola: {} };
+  }
+  document.body.className = "tema-" + (config.consola.tema || "cian");
+  $("panel-lateral").classList.toggle("oculto", config.consola.panel === false);
+  $("meta-perfil").innerHTML =
+    `perfil <b>${config.perfil} · ${config.nombre_perfil}</b>` +
+    ` · <b>${config.maquina}</b> · SSD <b>${config.ssd}</b> · v${config.version}`;
+  $("pie-info").textContent =
+    `monitor ${config.consola.columnas}×${config.consola.filas}` +
+    ` · POST ${config.consola.retardo_post_ms} ms/línea`;
+  parClaveValor($("emulador-dl"), [
+    ["Perfil", `${config.perfil} (${config.nombre_perfil})`],
+    ["Máquina", config.maquina],
+    ["SSD", config.ssd],
+    ["Versión", config.version],
+    ...((config.avisos || []).map((a, i) => [`Aviso ${i + 1}`, a])),
+  ]);
+  escribirLinea("IA-SO Brooder · emulador web — la máquina está apagada.");
+  escribirLinea("Pulsa ARRANCAR (el botón de arriba) para encenderla.");
+  await refrescarEstado();
+})();
+</script>
+</body>
+</html>

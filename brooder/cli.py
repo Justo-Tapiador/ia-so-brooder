@@ -130,58 +130,22 @@ def _cmd_exportar(args) -> int:
 # ------------------------------------------------------------------
 def cmd_arrancar(args) -> int:
     from brooder import pantalla
-    from brooder.nucleo import NucleoBrooder, aviso_contrato, montar_ssd
-    from brooder.primitivas.reales import PCReal
-    from brooder.primitivas.virtual import PCVirtual
+    from brooder.sesion import encender
 
-    # 1. máquina (virtual por defecto, real con sandbox)
-    if args.maquina_real:
-        maquina = PCReal(raiz_sandbox=args.sandbox)
-        tipo_maquina = "REAL (sandbox en disco)"
-    else:
-        maquina = PCVirtual()
-        tipo_maquina = "VIRTUAL"
-
-    # 2. cerebro: desde SSD o en blanco (para ver el arranque sin entrenar)
-    estado_sistema = None
-    if args.ssd and Path(args.ssd).exists():
-        cerebro, estado_sistema, manifiesto = montar_ssd(args.ssd)
-        origen = f"SSD {Path(args.ssd).name}"
-    else:
-        from brooder.cerebro import CerebroBrooder
-
-        cerebro = CerebroBrooder()
-        origen = "cerebro sin entrenar (aleatorio)"
-        print(
-            pantalla.amarillo(
-                "Aviso: no hay imagen SSD; se arrancará un cerebro aleatorio."
-            )
-        )
-
-    nucleo = NucleoBrooder(maquina, cerebro, estado=estado_sistema)
-    estado = nucleo.estado
-    estado.anotar_arranque()
-
-    # 3. POST + bienvenida
-    pantalla.splash_bios(nucleo.post(), rapido=args.rapido)
-    # hotfix contrato: el desfase kernel/cerebro se explica ANTES de que
-    # el usuario vea [FALLO]s mudos en 'montar' (fallo real en campo:
-    # parche de Fase 1 aplicado sin copiar su imagen SSD).
-    aviso = aviso_contrato(cerebro)
-    if aviso:
-        print(pantalla.amarillo(f"Aviso: {aviso}."))
-        print(
-            pantalla.amarillo(
-                "  Copia la imagen SSD reentrenada que acompaña al parche "
-                "sobre ssd/brooder.img."
-            )
-        )
-    print(f"Máquina: {tipo_maquina} | Cerebro: {origen}")
-    print(f"Sistema: {estado.resumen()}")
-    pantalla.banner_sesion()
+    # Fase 2 (emulador web): la sesión vive en brooder/sesion.py y la
+    # comparten el CLI y el servidor web. Con capturar=False el flujo
+    # visible es byte-idéntico al clásico (mismos prints, mismas pausas
+    # del POST); los 137 tests anteriores lo certifican.
+    sesion, _ = encender(
+        ssd=args.ssd,
+        maquina_real=args.maquina_real,
+        sandbox=args.sandbox,
+        detallado=args.detallado,
+        rapido=args.rapido,
+    )
 
     # 4. bucle de atención
-    while True:
+    while sesion.encendida:
         try:
             linea = input(pantalla.cian("brooder> ")).strip()
         except (EOFError, KeyboardInterrupt):
@@ -192,95 +156,34 @@ def cmd_arrancar(args) -> int:
         if not linea:
             continue
         comando = linea.lower()
-        if comando in (":salir", ":apagar", "salir", "exit"):
-            print("Apagando IA-SO... hasta pronto.")
-            break
-        if comando == ":ayuda" or comando == "ayuda":
-            pantalla.ayuda_interactiva()
-            continue
+        # recovery mantiene su menú interactivo con input() propio (el
+        # CLI puede: es un terminal de verdad); la consola web usa el
+        # modo por líneas de SesionInteractiva.
         if comando == ":recovery" or comando == "recovery":
-            if _bucle_recovery(nucleo, args):
+            if _bucle_recovery(sesion):
                 break
             continue
-        if comando in (":pendrive", "pendrive", "usb"):
-            # Fase 1: hot-plug manual del monitor — el mundo exterior
-            # enchufa o retira el pendrive del conector USB virtual.
-            _toggle_pendrive(nucleo)
-            continue
 
-        solicitud = Solicitud.desde_texto(linea)
-        if solicitud is None:
-            print(
-                pantalla.amarillo(
-                    "No entendí la solicitud. Prueba 'HOLA', '3+5', "
-                    "'guardar 4 G', 'recordar 2 Z', 'aviso A', 'montar', "
-                    "'escribir 3 P', 'leer 3 P' o :ayuda."
-                )
-            )
-            continue
+        for linea_salida in sesion.atender_linea(linea):
+            print(linea_salida)
 
-        resultado = nucleo.atender_solicitud(solicitud)
-        pantalla.mostrar_resultado_solicitud(resultado, detallado=args.detallado)
-
-    # 5. apagado: persistir el estado
-    if args.maquina_real:
-        estado.guardar(Path(args.sandbox) / "estado.json")
-    print(f"Sesión cerrada. {estado.resumen()}.")
+    # 5. apagado: persistir el estado y acta de cierre
+    for linea_salida in sesion.apagar():
+        print(linea_salida)
     return 0
 
 
-def _toggle_pendrive(nucleo) -> None:
-    """Fase 1: enchufa o retira el pendrive del conector (hot-plug)."""
-    from brooder import pantalla
+def _bucle_recovery(sesion) -> bool:
+    """Menú de recuperación. Devuelve True si hay que apagar.
 
-    maquina = nucleo.maquina
-    instante = maquina.instante()
-    if instante.dispositivo_conectado:
-        limpia = maquina.desconectar_dispositivo()
-        if limpia:
-            print(
-                "Conector USB: pendrive desconectado (estaba desmontado; "
-                "sus datos viajan con él)."
-            )
-        else:
-            print(
-                pantalla.rojo(
-                    "Conector USB: pendrive retirado MONTADO -> "
-                    "extraccion insegura registrada por el kernel; "
-                    "LOS DATOS DEL PENDRIVE SE PIERDEN."
-                )
-            )
-    else:
-        maquina.conectar_dispositivo()
-        print(
-            "Conector USB: pendrive conectado. Pide 'montar' a la IA "
-            "(y luego 'escribir 3 P' / 'leer 3 P')."
-        )
-
-
-def _bucle_recovery(nucleo, args) -> bool:
-    """Menú de recuperación. Devuelve True si hay que apagar."""
+    El menú (con ``input`` propio, como siempre) es del CLI; la acción
+    ejecutada es la MISMA que usará la consola web (método compartido
+    ``SesionInteractiva.ejecutar_recovery``).
+    """
     from brooder import pantalla
 
     accion = pantalla.menu_recovery()
-    if accion == "reiniciar":
-        print("Reiniciando el cerebro de Brooder...")
-        nucleo.cerebro.eval()
-        nucleo.estado.anotar_arranque()
-        print(pantalla.verde("IA reiniciada."))
-    elif accion == "estado":
-        diag = nucleo.diagnostico()
-        print(json.dumps(diag, ensure_ascii=False, indent=2))
-    elif accion == "diagnostico":
-        diag = nucleo.diagnostico()
-        for k, v in diag.items():
-            print(f"  {k}: {v}")
-    elif accion == "modo_seguro":
-        print("Modo seguro: la red permanece desactivada (política por defecto).")
-    elif accion == "apagar":
-        print("Apagando...")
-        return True
-    return False
+    return sesion.ejecutar_recovery(accion)
 
 
 # ------------------------------------------------------------------
@@ -658,6 +561,56 @@ def rojo_local(t):
 
 
 # ------------------------------------------------------------------
+# servidor (emulador web — Fase 2)
+# ------------------------------------------------------------------
+def cmd_servidor(args) -> int:
+    from brooder import pantalla
+    from brooder.config import cargar_config
+    from brooder.servidor import crear_httpd
+
+    config = cargar_config(args.config)
+    if args.host:
+        config.host = args.host
+    if args.puerto:
+        config.puerto = args.puerto
+
+    # la consola del SERVIDOR (no la de la IA): qué se está sirviendo
+    print(pantalla.negrita(pantalla.cian(f"IA-SO BROODER · EMULADOR WEB v{VERSION}")))
+    print(
+        f"Config: {args.config} · perfil {config.perfil} "
+        f"({config.nombre_perfil}) · máquina {config.maquina} · SSD {config.ssd}"
+    )
+    print(
+        f"Monitor: {config.columnas}x{config.filas} · tema {config.tema} · "
+        f"POST {config.retardo_post_ms} ms/línea"
+    )
+    for aviso in config.avisos:
+        print(pantalla.amarillo(f"Aviso: {aviso}"))
+    if config.host not in ("127.0.0.1", "localhost", "::1"):
+        print(
+            pantalla.rojo(
+                f"ALERTA: el emulador escuchará en {config.host} — visible "
+                "desde tu red. Cualquier equipo podrá teclear en la consola."
+            )
+        )
+
+    httpd = crear_httpd(config)
+    host_real, puerto_real = httpd.server_address[:2]
+    print()
+    print(pantalla.negrita(f"Consola lista: http://{host_real}:{puerto_real}/"))
+    print("Una sesión única (una consola = una máquina). Ctrl+C para detener.")
+    print()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    print("Emulador detenido.")
+    return 0
+
+
+# ------------------------------------------------------------------
 # diagnostico
 # ------------------------------------------------------------------
 def cmd_diagnostico(args) -> int:
@@ -852,6 +805,29 @@ def construir_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("primitivas", help="listar el contrato de hardware")
     p.set_defaults(func=cmd_primitivas)
+
+    p = sub.add_parser(
+        "servidor",
+        help="emulador web: la consola de la IA-SO en el navegador",
+    )
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.json"),
+        help="ruta del config.json (perfil, monitor, máquina)",
+    )
+    p.add_argument(
+        "--host",
+        default=None,
+        help="sobrescribe red.host del config (cuidado: 0.0.0.0 expone a LAN)",
+    )
+    p.add_argument(
+        "--puerto",
+        type=int,
+        default=None,
+        help="sobrescribe red.puerto del config",
+    )
+    p.set_defaults(func=cmd_servidor)
 
     return parser
 

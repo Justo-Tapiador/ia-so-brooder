@@ -1,0 +1,8 @@
+{
+  "perfil": "D",
+  "maquina": "virtual",
+  "ssd": "ssd/brooder.img",
+  "sandbox": "brooder_sandbox",
+  "red": { "host": "127.0.0.1", "puerto": 7800 },
+  "consola": { "tema": "cian" }
+}

@@ -224,17 +224,32 @@ MENU_RECOVERY = [
 ]
 
 
+def render_menu_recovery() -> list:
+    """Las líneas del menú de recuperación, sin preguntar.
+
+    Fase 2 (emulador web): la consola del navegador no puede hacer
+    ``input`` anidado — imprime estas líneas y la SIGUIENTE línea que
+    llegue será la opción elegida. ``menu_recovery`` (el CLI) reutiliza
+    exactamente las mismas líneas.
+    """
+    lineas = [
+        "",
+        negrita(cian("╔════════════════════════════════════════╗")),
+        negrita(cian("║        IA-SO BROODER  ·  RECOVERY       ║")),
+        negrita(cian("╚════════════════════════════════════════╝")),
+        tenue("  Entorno de emergencia independiente de la IA."),
+        "",
+    ]
+    for tecla, etiqueta, _ in MENU_RECOVERY:
+        lineas.append(f"   [{amarillo(tecla)}] {etiqueta}")
+    lineas.append("")
+    return lineas
+
+
 def menu_recovery() -> str:
     """Imprime el menú de recuperación y devuelve la opción elegida."""
-    print()
-    print(negrita(cian("╔════════════════════════════════════════╗")))
-    print(negrita(cian("║        IA-SO BROODER  ·  RECOVERY       ║")))
-    print(negrita(cian("╚════════════════════════════════════════╝")))
-    print(tenue("  Entorno de emergencia independiente de la IA."))
-    print()
-    for tecla, etiqueta, _ in MENU_RECOVERY:
-        print(f"   [{amarillo(tecla)}] {etiqueta}")
-    print()
+    for linea in render_menu_recovery():
+        print(linea)
     eleccion = input("  Elige una opción> ").strip().upper()
     for tecla, _, accion in MENU_RECOVERY:
         if eleccion == tecla:
