@@ -16,6 +16,14 @@ Diseño de recompensas (denso, para acelerar el aprendizaje):
   +0.30   pitido válido (tras leer ALARMA)
   -0.15   escritura en el dispositivo equivocada
   -0.30   pitido prematuro o repetido
+  +0.10   trazar con REGISTRAR_LOG la operación de
+          almacenamiento correcta, en tareas de almacenamiento
+          (GUARDAR/RECORDAR; ≤ TRAZO_VENTANA ciclos después;
+          máximo 1 premio por tipo/solicitud)
+  -0.03   REGISTRAR_LOG con un mensaje ya emitido en la
+          solicitud (suprime el spam de repeticiones)
+  +0.25   montar/desmontar el pendrive en la dirección
+          que pide la solicitud (Fase 1, solo en DISPOSITIVO)
   +1.00   solicitud resuelta (condiciones de éxito completas)
   -0.50   solicitud fallida o carácter erróneo en pantalla
           (fallo temprano: la pantalla es solo-append)
@@ -23,7 +31,9 @@ Diseño de recompensas (denso, para acelerar el aprendizaje):
 El entorno también expone `Oraculo`: la política *ideal* escrita a
 mano. Sirve para dos cosas: (1) verificar en los tests que el
 entorno es resoluble al 100 %, y (2) comparar qué tan lejos está la
-IA del programa perfecto.
+IA del programa perfecto. Desde la Fase 0.5 el oráculo también
+traza: registra la escritura y la lectura de almacenamiento justo
+después de ejecutarlas, y sirve de referencia del 100 % de trazado.
 """
 from __future__ import annotations
 
@@ -31,6 +41,8 @@ import random
 
 from brooder.constantes import (
     ARG_BUS,
+    MENSAJE_LOG_LECTURA,
+    MENSAJE_LOG_ESCRITURA,
     TOKEN_ALARMA,
     Primitiva,
     Tarea,
@@ -57,6 +69,40 @@ R_EXITO = 1.00
 R_FALLO = -0.50
 R_NOVEDAD = 0.02      # curiosidad: probar capacidades poco usadas
 
+# --- trazado del registro (Fase 0.5) ------------------------------
+# Trazar es declarar una operación sensible en la consola del kernel
+# JUSTO después de ejecutarla. El premio es acotado por diseño: como
+# máximo 1 por tipo de operación y solicitud, en una ventana corta.
+# Así no se puede "cultivar" recompensa intercalando logs (el
+# log-spam además paga su ciclo), y la política óptima sigue siendo
+# resolver la solicitud: el trazado es un extra, no un sustituto.
+R_TRAZO_VALIDO = 0.10
+R_TRAZO_RUIDO = -0.03  # mensaje ya emitido en esta solicitud
+TRAZO_VENTANA = 2      # ciclos máx. entre la operación y su traza
+# el trazado vive en las tareas de ALMACENAMIENTO: en ECO/SUMA/AVISO
+# no hay operaciones que declarar, y permitir el premio ahí crearía
+# un señuelo (escribir en RAM por escribir para luego trazarlo) que
+# distrae del aprendizaje de la tarea (bug real de la primera
+# incubación de la Fase 0.5: SUMA se estancó al 45 %).
+TRAZO_TAREAS = (Tarea.GUARDAR, Tarea.RECORDAR)
+# operaciones de almacenamiento que el oráculo/la IA pueden trazar
+OPERACIONES_ESCRITURA = (Primitiva.ESCRIBIR_DISCO, Primitiva.ESCRIBIR_MEMORIA)
+OPERACIONES_LECTURA = (Primitiva.LEER_DISCO, Primitiva.LEER_MEMORIA)
+_MENSAJE_POR_TIPO = {
+    "lectura": MENSAJE_LOG_LECTURA,
+    "escritura": MENSAJE_LOG_ESCRITURA,
+}
+
+# --- dispositivo externo (Fase 1) ---------------------------------
+# Administrar el pendrive se premia SOLO en la tarea DISPOSITIVO: la
+# misma lección anti-señuelo del trazado. En el resto de tareas el
+# conector está vacío (el hot-plug lo aplica el entorno únicamente en
+# las solicitudes de dispositivo) y MONTAR/DESMONTAR fracasan en la
+# máquina sin más recompensa que su ciclo: no se puede "cultivar"
+# premio enchufando hardware en mitad de un ECO.
+R_DISP_OK = 0.25
+TAREAS_DISPOSITIVO = (Tarea.DISPOSITIVO,)
+
 # La curiosidad es una recompensa de exploración clásica (count-based
 # bonus): probar una primitiva que apenas se ha usado recibe un
 # pequeño premio 1/sqrt(n) que se extingue solo. Sin ella, una
@@ -81,10 +127,24 @@ class EntornoBrooder:
         self._pitido_moldeado = False
         self._prefijo_max = 0
         self._direccion_moldeada = False
+        # trazado (Fase 0.5): operación pendiente de traza, tipos ya
+        # trazados y mensajes ya emitidos en esta solicitud
+        self._trazo_pendiente = None        # (tipo, ciclo) o None
+        self._tipos_trazados = set()
+        self._mensajes_emitidos = set()
+        self._ciclo_solicitud = 0
+        # dispositivo (Fase 1): premio de administración ya concedido
+        self._disp_moldeado = False
         # métricas
         self.resultados = []  # (tarea, exito) por solicitud
+        # trazado: (aciertos, oportunidades) por tarea y ventana móvil
+        self.trazos_detalle = {}
+        self.trazos_recientes = []  # (tarea, trazos, ops) por solicitud
         # curiosidad: conteos de uso por primitiva (con decaimiento)
         self._conteos_novedad = {}
+        # contadores de trazado del episodio en curso
+        self._ops_episodio = 0
+        self._trazos_episodio = 0
 
     # --------------------------------------------------
     # ciclo de vida
@@ -102,6 +162,14 @@ class EntornoBrooder:
         # escritura realizada en ESTA solicitud.
         self.maquina.reiniciar()
         self.maquina.escribir_teclado(self.solicitud.tokens)
+        # Fase 1: en las solicitudes de dispositivo, el mundo exterior
+        # enchufa el pendrive (hot-plug del kernel). En modo
+        # "desmontar" lo deja ADEMÁS montado — lo montó la sesión
+        # anterior — para que el trabajo de la política sea liberarlo.
+        if tarea in TAREAS_DISPOSITIVO:
+            self.maquina.conectar_dispositivo()
+            if self.solicitud.datos.get("modo") == "desmontar":
+                self.maquina.montar_dispositivo()
         self.ciclos_restantes = self.solicitud.presupuesto
         self._suma_moldeada = False
         self._escritura_moldeada = False
@@ -109,6 +177,13 @@ class EntornoBrooder:
         self._pitido_moldeado = False
         self._prefijo_max = 0
         self._direccion_moldeada = False
+        self._trazo_pendiente = None
+        self._tipos_trazados = set()
+        self._mensajes_emitidos = set()
+        self._ciclo_solicitud = 0
+        self._ops_episodio = 0
+        self._trazos_episodio = 0
+        self._disp_moldeado = False
         return self.observar()
 
     def observar(self) -> list:
@@ -132,6 +207,21 @@ class EntornoBrooder:
         self.maquina.avanzar_paso()
         instante = self.maquina.instante()
         self.ciclos_restantes -= 1
+        ciclo = self._ciclo_solicitud
+        self._ciclo_solicitud += 1
+
+        # --- trazado (Fase 0.5): operación sensible recién ejecutada
+        # (una escritura/lectura de almacenamiento exitosa queda
+        # "pendiente de traza" durante TRAZO_VENTANA ciclos; solo en
+        # las tareas de almacenamiento, ver TRAZO_TAREAS)
+        if exito_ejecucion and primitiva in OPERACIONES_ESCRITURA:
+            if self.solicitud.tarea in TRAZO_TAREAS:
+                self._trazo_pendiente = ("escritura", ciclo)
+                self._anotar_trazable()
+        elif exito_ejecucion and primitiva in OPERACIONES_LECTURA:
+            if self.solicitud.tarea in TRAZO_TAREAS:
+                self._trazo_pendiente = ("lectura", ciclo)
+                self._anotar_trazable()
 
         recompensa = R_CICLO
         terminada = False
@@ -244,6 +334,52 @@ class EntornoBrooder:
             else:
                 recompensa += R_PITIDO_MAL
 
+        # --- moldeado: trazado del registro (Fase 0.5) -------------
+        # REGISTRAR_LOG con el mensaje QUE TOCA, en el ciclo que toca:
+        # la consola del kernel refleja la operación recién ejecutada.
+        # Un mensaje equivocado (o una traza tardía) no castiga: paga
+        # su ciclo como cualquier acción no productiva. Repetir un
+        # mensaje ya emitido en la solicitud sí penaliza un poco: sin
+        # esto, el argmax puede caer en un bucle de log(1) inofensivo
+        # pero ruidoso (patología vista en la incubación real).
+        if primitiva == Primitiva.REGISTRAR_LOG and exito_ejecucion:
+            if argumento in self._mensajes_emitidos:
+                recompensa += R_TRAZO_RUIDO
+            else:
+                self._mensajes_emitidos.add(argumento)
+            if self._trazo_pendiente is not None:
+                tipo, ciclo_op = self._trazo_pendiente
+                if (
+                    ciclo - ciclo_op <= TRAZO_VENTANA
+                    and argumento == _MENSAJE_POR_TIPO[tipo]
+                    and tipo not in self._tipos_trazados
+                ):
+                    recompensa += R_TRAZO_VALIDO
+                    self._tipos_trazados.add(tipo)
+                    self._anotar_trazo()
+                    # la operación queda declarada: la próxima traza
+                    # válida exigirá una operación nueva
+                    self._trazo_pendiente = None
+
+        # --- moldeado: dispositivo externo (Fase 1) ------------------
+        # montar/desmontar EN LA DIRECCIÓN que pide la solicitud, solo
+        # en la tarea DISPOSITIVO (anti-señuelo). La dirección equivoca
+        # (p. ej. desmontar cuando se pide montar) fracasa en la
+        # máquina: paga su ciclo, sin castigo extra — igual que el
+        # resto del moldeado de dispositivos.
+        if (
+            sol.tarea in TAREAS_DISPOSITIVO
+            and exito_ejecucion
+            and not self._disp_moldeado
+        ):
+            modo = sol.datos.get("modo")
+            if (
+                (modo == "montar" and primitiva == Primitiva.MONTAR_DISPOSITIVO)
+                or (modo == "desmontar" and primitiva == Primitiva.DESMONTAR_DISPOSITIVO)
+            ):
+                recompensa += R_DISP_OK
+                self._disp_moldeado = True
+
         # --- condiciones terminales -----------------------------
         if sol.exito(instante):
             terminada, causa = True, "exito"
@@ -274,6 +410,23 @@ class EntornoBrooder:
 
     def _registrar(self, exito: bool) -> None:
         self.resultados.append((self.solicitud.tarea.name, exito))
+        self.trazos_recientes.append(
+            (self.solicitud.tarea.name, self._trazos_episodio, self._ops_episodio)
+        )
+
+    def _anotar_trazable(self) -> None:
+        """Cuenta una operación de almacenamiento que podía trazarse."""
+        tarea = self.solicitud.tarea.name
+        aciertos, oportunidades = self.trazos_detalle.get(tarea, (0, 0))
+        self.trazos_detalle[tarea] = (aciertos, oportunidades + 1)
+        self._ops_episodio += 1
+
+    def _anotar_trazo(self) -> None:
+        """Cuenta una traza correcta (mensaje y momento adecuados)."""
+        tarea = self.solicitud.tarea.name
+        aciertos, oportunidades = self.trazos_detalle.get(tarea, (0, 0))
+        self.trazos_detalle[tarea] = (aciertos + 1, oportunidades)
+        self._trazos_episodio += 1
 
     # --------------------------------------------------
     # métricas
@@ -292,8 +445,40 @@ class EntornoBrooder:
             for tarea, (aciertos, total) in conteo.items()
         }
 
+    def tasa_trazado(self) -> dict:
+        """Trazado correcto por tarea: trazas válidas / operaciones trazables.
+
+        El 100 % significa: cada escritura/lectura de almacenamiento
+        quedó declarada en el registro con el mensaje correcto y en
+        el momento oportuno. Es la métrica que la Fase 0.5 quiere
+        subir de 0 (cerebro viejo: no puede trazar) a la referencia
+        del oráculo.
+        """
+        return {
+            tarea: (aciertos / oportunidades, oportunidades)
+            for tarea, (aciertos, oportunidades) in self.trazos_detalle.items()
+            if oportunidades
+        }
+
+    def tasa_trazado_ventana(self, ventana: int = 200) -> float:
+        """Trazado global en la ventana móvil de solicitudes.
+
+        Es la medida ESTOCÁSTICA del trazado (la que ve el muestreo de
+        entrenamiento, no el argmax). La incubadora la registra como
+        métrica de observabilidad; la decisión de explorar/consolidar
+        se toma sobre la eval determinista, porque la entropía diluye
+        el muestreo y esta ventana subestima lo que el argmax ya sabe
+        hacer (lección de la Fase 0.5).
+        """
+        recientes = self.trazos_recientes[-ventana:]
+        ops = sum(o for _, _, o in recientes)
+        trazos = sum(t for _, t, _ in recientes)
+        return (trazos / ops) if ops else 0.0
+
     def limpiar_metricas(self) -> None:
         self.resultados = []
+        self.trazos_detalle = {}
+        self.trazos_recientes = []
 
 
 # ------------------------------------------------------------------
@@ -333,16 +518,33 @@ class Oraculo:
         elif s.tarea == Tarea.GUARDAR:
             p += [(Primitiva.LEER_TECLADO, 0), (Primitiva.MOVER_CABEZAL_DISCO, ARG_BUS)]
             p += [(Primitiva.LEER_TECLADO, 0), (Primitiva.ESCRIBIR_DISCO, ARG_BUS)]
-            p += [(Primitiva.LEER_DISCO, 0), (Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
+            # Fase 0.5: el programa ideal declara sus operaciones de
+            # almacenamiento en la consola del kernel (trazado)
+            p += [(Primitiva.REGISTRAR_LOG, MENSAJE_LOG_ESCRITURA)]
+            p += [(Primitiva.LEER_DISCO, 0), (Primitiva.REGISTRAR_LOG, MENSAJE_LOG_LECTURA)]
+            p += [(Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
 
         elif s.tarea == Tarea.RECORDAR:
             p += [(Primitiva.LEER_TECLADO, 0), (Primitiva.MOVER_PUNTERO_MEMORIA, ARG_BUS)]
             p += [(Primitiva.LEER_TECLADO, 0), (Primitiva.ESCRIBIR_MEMORIA, ARG_BUS)]
-            p += [(Primitiva.LEER_MEMORIA, 0), (Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
+            p += [(Primitiva.REGISTRAR_LOG, MENSAJE_LOG_ESCRITURA)]
+            p += [(Primitiva.LEER_MEMORIA, 0), (Primitiva.REGISTRAR_LOG, MENSAJE_LOG_LECTURA)]
+            p += [(Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
 
         elif s.tarea == Tarea.AVISO:
             p += [(Primitiva.LEER_TECLADO, 0), (Primitiva.MOSTRAR_EN_PANTALLA, ARG_BUS)]
             p += [(Primitiva.LEER_TECLADO, 0), (Primitiva.REPRODUCIR_AUDIO, ARG_BUS)]
+
+        elif s.tarea == Tarea.DISPOSITIVO:
+            # Fase 1: el programa ideal lee el estado del conector en
+            # los canales de percepción y decide: pendrive presente y
+            # sin montar -> montar; montado -> desmontar (extracción
+            # segura). El kernel anota ambas operaciones en su
+            # registro (dmesg) sin intervención del oráculo.
+            if s.datos.get("modo") == "desmontar":
+                p += [(Primitiva.DESMONTAR_DISPOSITIVO, 0)]
+            else:
+                p += [(Primitiva.MONTAR_DISPOSITIVO, 0)]
 
         # margen de reposo hasta que el núcleo declare el éxito
         p += [(Primitiva.NADA, 0)] * 6

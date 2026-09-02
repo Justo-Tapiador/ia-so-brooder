@@ -19,17 +19,25 @@ archivo, sin capacidad de ejecutar nada.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 
 from brooder.constantes import (
     ARG_BUS,
+    MENSAJES_LOG,
+    MENSAJE_LOG_DISP_DESMONTADO,
+    MENSAJE_LOG_DISP_MONTADO,
+    MENSAJE_LOG_EXTRACCION_INSEGURA,
     N_RANURAS_DISCO,
     N_RANURAS_MEMORIA,
     N_TOKENS,
     PANTALLA_MAX,
     PRIMITIVAS_DATO_BUS,
     Primitiva,
+    REGISTRO_CAPACIDAD,
+    REGISTRO_PANEL_LINEAS,
     TABLA_PRIMITIVAS,
+    formatear_registro,
 )
 
 
@@ -61,6 +69,14 @@ class InstanteMaquina:
     pitidos: tuple = field(default_factory=tuple)   # (paso, frecuencia)
     # red
     red_paquetes: int = 0
+    # registro del sistema (macro-primitiva REGISTRAR_LOG)
+    # entradas (paso, id_mensaje) del anillo del kernel
+    registro: tuple = field(default_factory=tuple)
+    # dispositivo externo (Fase 1: pendrive virtual del conector USB)
+    # conectado = presencia física (hot-plug externo); montado =
+    # aceptado por decisión de la política con la macro-primitiva
+    dispositivo_conectado: bool = False
+    dispositivo_montado: bool = False
     # señalización del último ciclo
     ultimo_error: str = ""
     ultimo_evento: str = ""           # descripción legible del último ciclo
@@ -175,6 +191,29 @@ class InterfazPrimitivas(ABC):
     def leer_red(self) -> bool: ...
 
     # --------------------------------------------------
+    # registro del sistema (macro-primitivas)
+    # --------------------------------------------------
+    @abstractmethod
+    def registrar_log(self, mensaje: int) -> bool: ...
+
+    @abstractmethod
+    def panel_registro(self) -> list: ...
+
+    # --------------------------------------------------
+    # dispositivo externo (Fase 1: pendrive virtual)
+    # --------------------------------------------------
+    @abstractmethod
+    def montar_dispositivo(self) -> bool: ...
+
+    @abstractmethod
+    def desmontar_dispositivo(self) -> bool: ...
+
+    # El hot-plug (conectar/desconectar) NO es una primitiva: es un
+    # evento del mundo exterior. Lo aplica el kernel directamente
+    # (demo, entorno de entrenamiento, :pendrive interactivo) — la IA
+    # no puede enchufar ni desenchufar hardware, solo administrarlo.
+
+    # --------------------------------------------------
     # observación
     # --------------------------------------------------
     @abstractmethod
@@ -226,6 +265,12 @@ class InterfazPrimitivas(ABC):
             return self.usar_gpu()
         if primitiva == Primitiva.LEER_RED:
             return self.leer_red()
+        if primitiva == Primitiva.REGISTRAR_LOG:
+            return self.registrar_log(v)
+        if primitiva == Primitiva.MONTAR_DISPOSITIVO:
+            return self.montar_dispositivo()
+        if primitiva == Primitiva.DESMONTAR_DISPOSITIVO:
+            return self.desmontar_dispositivo()
         raise ValueError(f"Primitiva desconocida: {primitiva!r}")
 
 
@@ -290,6 +335,14 @@ class MaquinaBase(InterfazPrimitivas):
         self._memoria_puntero = 0
         self._pitidos: list = []
         self._red_paquetes: list = []
+        # registro del sistema: anillo del kernel (se vacía solo en
+        # arranque en frío; persiste entre solicitudes, como dmesg)
+        self._registro: deque = deque(maxlen=REGISTRO_CAPACIDAD)
+        # dispositivo externo (Fase 1): el conector USB arranca vacío.
+        # El estado persiste entre solicitudes (es hardware enchufado,
+        # no estado del proceso) y se pierde solo en arranque en frío.
+        self._disp_conectado: bool = False
+        self._disp_montado: bool = False
         self._paso = 0
         self._ultimo_error = ""
         self._ultimo_evento = ""
@@ -520,6 +573,101 @@ class MaquinaBase(InterfazPrimitivas):
         return False
 
     # --------------------------------------------------
+    # registro del sistema (primera macro-primitiva)
+    # --------------------------------------------------
+    def registrar_log(self, mensaje: int) -> bool:
+        """Añade una entrada al anillo del registro del sistema.
+
+        El mensaje es un id de MENSAJES_LOG (vocabulario cerrado):
+        la IA nunca dicta texto libre — solo elige QUÉ evento
+        declarar, y la línea formateada la produce la máquina.
+        """
+        if not (0 <= mensaje < len(MENSAJES_LOG)):
+            self._error("registrar_log: mensaje desconocido")
+            return False
+        self._registro.append((self._paso, mensaje))
+        nivel, texto = MENSAJES_LOG[mensaje]
+        self._evento(f"registrar_log[{mensaje}] {nivel}: {texto}")
+        return True
+
+    def panel_registro(self) -> list:
+        """Últimas entradas formateadas para el panel de la TUI."""
+        ultimas = list(self._registro)[-REGISTRO_PANEL_LINEAS:]
+        lineas = [formatear_registro(paso, mensaje) for paso, mensaje in ultimas]
+        lineas += [""] * (REGISTRO_PANEL_LINEAS - len(lineas))
+        return lineas
+
+    # --------------------------------------------------
+    # dispositivo externo (Fase 1: pendrive virtual)
+    # --------------------------------------------------
+    # Ciclo de vida: conectar (externo) -> montar (la IA decide) ->
+    # desmontar (la IA decide) -> desconectar (externo). Si el mundo
+    # exterior desconecta con el pendrive montado, el kernel anota
+    # "extraccion insegura" en el registro y libera el estado: es la
+    # versión virtual de perder el búfer sin sincronizar.
+    def montar_dispositivo(self) -> bool:
+        """Acepta el pendrive presente en el conector USB."""
+        if not self._disp_conectado:
+            self._error("montar_dispositivo: no hay dispositivo en el conector")
+            return False
+        if self._disp_montado:
+            self._error("montar_dispositivo: ya montado")
+            return False
+        self._disp_montado = True
+        # dmesg del kernel: la operación queda anotada en el registro
+        self._registro.append((self._paso, MENSAJE_LOG_DISP_MONTADO))
+        self._evento("montar_dispositivo: dispositivo montado")
+        return True
+
+    def desmontar_dispositivo(self) -> bool:
+        """Libera el pendrive de forma limpia (extracción segura)."""
+        if not self._disp_montado:
+            self._error("desmontar_dispositivo: no hay dispositivo montado")
+            return False
+        self._disp_montado = False
+        self._registro.append((self._paso, MENSAJE_LOG_DISP_DESMONTADO))
+        self._evento("desmontar_dispositivo: dispositivo desmontado")
+        return True
+
+    def conectar_dispositivo(self) -> bool:
+        """Hot-plug: el mundo exterior enchufa el pendrive (kernel)."""
+        if self._disp_conectado:
+            self._error("conectar_dispositivo: ya hay dispositivo")
+            return False
+        self._disp_conectado = True
+        self._evento("conector USB: pendrive conectado")
+        return True
+
+    def desconectar_dispositivo(self) -> bool:
+        """Hot-plug: el mundo exterior retira el pendrive (kernel).
+
+        Si el pendrive estaba montado, la extracción es INSEGURA: el
+        kernel lo anota como ERROR en el registro (la traza que un SO
+        real deja al retirar un USB sin desmontar) y libera el estado
+        del conector.
+        """
+        if not self._disp_conectado:
+            self._error("desconectar_dispositivo: el conector está vacío")
+            return False
+        insegura = self._disp_montado
+        self._disp_conectado = False
+        self._disp_montado = False
+        if insegura:
+            self._registro.append((self._paso, MENSAJE_LOG_EXTRACCION_INSEGURA))
+            self._evento("conector USB: EXTRACCION INSEGURA (pendrive montado)")
+        else:
+            self._evento("conector USB: pendrive desconectado")
+        return not insegura
+
+    @property
+    def dispositivo_conectado(self) -> bool:
+        return self._disp_conectado
+
+    @property
+    def dispositivo_montado(self) -> bool:
+        return self._disp_montado
+
+    # --------------------------------------------------
     # observación
     # --------------------------------------------------
     def instante(self) -> InstanteMaquina:
@@ -536,6 +684,9 @@ class MaquinaBase(InterfazPrimitivas):
             memoria_contenido=tuple(self._memoria),
             pitidos=tuple(self._pitidos),
             red_paquetes=len(self._red_paquetes),
+            registro=tuple(self._registro),
+            dispositivo_conectado=self._disp_conectado,
+            dispositivo_montado=self._disp_montado,
             ultimo_error=self._ultimo_error,
             ultimo_evento=self._ultimo_evento,
             escrituras_disco=self._escrituras_disco,

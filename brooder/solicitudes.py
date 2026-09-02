@@ -72,6 +72,15 @@ class Solicitud:
             return m.memoria_contenido[self.datos["K"]] == self.datos["V"]
         if self.tarea == Tarea.AVISO:
             return self.pitidos_validos(m) == 1
+        if self.tarea == Tarea.DISPOSITIVO:
+            # la pantalla debe quedar vacía (no hay nada que mostrar:
+            # administrar hardware no produce salida de consola) y el
+            # pendrive debe quedar en el estado pedido, AÚN CONECTADO:
+            # desmontar no es perder el dispositivo, es liberarlo de
+            # forma segura para que el mundo pueda retirarlo.
+            if self.datos.get("modo") == "desmontar":
+                return (not m.dispositivo_montado) and m.dispositivo_conectado
+            return m.dispositivo_montado and m.dispositivo_conectado
         return False
 
     def pitidos_validos(self, m: InstanteMaquina) -> int:
@@ -103,6 +112,8 @@ class Solicitud:
             )
         if self.tarea == Tarea.AVISO:
             return f"aviso('{tokens_a_texto([self.datos['X']])}')"
+        if self.tarea == Tarea.DISPOSITIVO:
+            return f"dispositivo({self.datos.get('modo', 'montar')})"
         return self.tarea.name
 
     # --------------------------------------------------
@@ -112,9 +123,12 @@ class Solicitud:
     def aleatoria(tarea: Tarea, rng) -> "Solicitud":
         """Fabrica una solicitud aleatoria y bien etiquetada."""
         if tarea == Tarea.ECO:
-            # longitud 1..5: las solicitudes cortas son el primer peldaño
-            # (leer -> mostrar -> éxito) desde el que crece el bucle
-            longitud = rng.randint(1, 5)
+            # longitud 1..8: cubre con margen los ecos largos de la
+            # demo ('BROODER', 7 letras). El presupuesto (24 ciclos)
+            # admite hasta 12; entrenar hasta 8 deja holgura sin
+            # alargar los episodios. Regresión de la Fase 0.5: con
+            # 1..5 el cerebro con trazado fallaba el eco de 7.
+            longitud = rng.randint(1, 8)
             tokens = [rng.choice(LETRAS_ENTRENAMIENTO) for _ in range(longitud)]
             return Solicitud(Tarea.ECO, tokens=list(tokens), esperado=list(tokens))
 
@@ -143,6 +157,21 @@ class Solicitud:
                 datos={"X": X},
             )
 
+        if tarea == Tarea.DISPOSITIVO:
+            # Fase 1: administrar el pendrive del conector. La
+            # solicitud no entra por el teclado (no hay nada que
+            # teclear) ni espera salida en pantalla: es un evento de
+            # hardware. El ENTORNO conecta el pendrive al empezar; en
+            # modo "desmontar" lo deja además ya montado (lo montó
+            # "la sesión anterior"), y la política debe decidir el
+            # montar/desmontar que corresponda leyendo los canales de
+            # percepción del dispositivo.
+            modo = rng.choice(("montar", "desmontar"))
+            return Solicitud(
+                Tarea.DISPOSITIVO, tokens=[], esperado=[],
+                datos={"modo": modo},
+            )
+
         raise ValueError(f"Tarea sin generador: {tarea}")
 
     # --------------------------------------------------
@@ -163,6 +192,8 @@ class Solicitud:
           guardar 4 G     -> GUARDAR (ranura 4, valor G)
           recordar 2 Z    -> RECORDAR
           aviso A         -> AVISO
+          montar          -> DISPOSITIVO (montar el pendrive del conector)
+          desmontar       -> DISPOSITIVO (extracción segura)
         """
         t = texto.strip().upper()
         if not t:
@@ -170,6 +201,15 @@ class Solicitud:
 
         if t.startswith(("ECO ", "SUMA ", "GUARDAR ", "RECORDAR ", "AVISO ")):
             verbo, resto = t.split(" ", 1)
+        elif t in ("MONTAR", "DESMONTAR"):
+            # Fase 1: solicitudes de dispositivo (sin argumentos). Si
+            # no hay pendrive conectado, la solicitud se atiende igual
+            # y falla con el error del kernel: honesto, como un
+            # 'mount' sobre un conector vacío.
+            return Solicitud(
+                Tarea.DISPOSITIVO, tokens=[], esperado=[],
+                datos={"modo": t.lower()},
+            )
         else:
             verbo, resto = "", t
 

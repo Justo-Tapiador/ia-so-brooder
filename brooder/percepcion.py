@@ -11,9 +11,14 @@ La usan, sin excepción:
 Gracias a eso, la política entrenada percibe exactamente lo mismo
 que la política desplegada: cero desajuste de distribución.
 
-Diseño del vector (OBS_DIM = 21):
+Diseño del vector (OBS_DIM = 24):
 
-  [0..4]    tarea actual, one-hot (canal de control del cargador)
+  [0..4]    tarea clásica, one-hot (canal de control del cargador).
+            La tarea DISPOSITIVO NO usa el one-hot: su canal vive al
+            final (posición 21) para que las 21 primeras posiciones
+            sean BIT A BIT el contrato viejo (compatibilidad de
+            prefijo: los cerebros con dim_entrada=21 siguen montando;
+            el núcleo recorta la observación a su dim_entrada).
   [5]       tokens pendientes en el teclado / 8
   [6]       1.0 si hay datos en el teclado
   [7]       valor del bus de datos / 37
@@ -30,11 +35,14 @@ Diseño del vector (OBS_DIM = 21):
   [18]      1.0 si ya se emitió algún pitido en esta solicitud
   [19]      1.0 si ya se escribió en el disco en esta solicitud
   [20]      1.0 si ya se escribió en la RAM en esta solicitud
+  [21]      1.0 si la solicitud es de dispositivo (Fase 1)
+  [22]      1.0 si hay pendrive en el conector USB
+  [23]      1.0 si el pendrive está montado
 """
 from __future__ import annotations
 
 from brooder.constantes import (
-    N_TAREAS,
+    N_TAREAS_CLASICAS,
     Tarea,
 )
 from brooder.primitivas.base import InstanteMaquina
@@ -48,8 +56,12 @@ def construir_observacion(
     ciclos_restantes: int,
 ) -> list:
     """Fotografía el estado de la máquina como vector de percepción."""
-    obs = [0.0] * N_TAREAS
-    obs[int(tarea)] = 1.0
+    # one-hot SOLO de las tareas clásicas: la tarea DISPOSITIVO usa su
+    # canal escalar propio al final (compatibilidad de prefijo, ver
+    # docstring del módulo y constantes.OBS_DIM).
+    obs = [0.0] * N_TAREAS_CLASICAS
+    if tarea != Tarea.DISPOSITIVO:
+        obs[int(tarea)] = 1.0
 
     obs.append(min(instante.teclado_pendientes, 8) / 8.0)        # [5]
     obs.append(1.0 if instante.teclado_hay_datos else 0.0)       # [6]
@@ -69,12 +81,16 @@ def construir_observacion(
     obs.append(1.0 if instante.pitidos else 0.0)                 # [18]
     obs.append(1.0 if instante.escrituras_disco else 0.0)        # [19]
     obs.append(1.0 if instante.escrituras_memoria else 0.0)      # [20]
+    # --- Fase 1: canales del dispositivo externo (pendrive) ---------
+    obs.append(1.0 if tarea == Tarea.DISPOSITIVO else 0.0)        # [21]
+    obs.append(1.0 if instante.dispositivo_conectado else 0.0)   # [22]
+    obs.append(1.0 if instante.dispositivo_montado else 0.0)     # [23]
     return obs
 
 
 def nombre_de_canales() -> list:
     """Nombres legibles de cada dimensión (para depuración/TUI)."""
-    nombres = [f"tarea_{t.name.lower()}" for t in Tarea]
+    nombres = [f"tarea_{t.name.lower()}" for t in list(Tarea)[:N_TAREAS_CLASICAS]]
     nombres += [
         "teclado_pend",
         "teclado_hay",
@@ -92,5 +108,8 @@ def nombre_de_canales() -> list:
         "pitido_hecho",
         "escrituras_disco",
         "escrituras_memoria",
+        "disp_tarea",
+        "disp_conectado",
+        "disp_montado",
     ]
     return nombres

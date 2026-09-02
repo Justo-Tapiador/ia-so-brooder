@@ -22,7 +22,10 @@ from pathlib import Path
 import torch
 
 from brooder.constantes import (
+    MENSAJES_LOG,
     NOMBRE_PROYECTO,
+    N_PRIMITIVAS,
+    OBS_DIM,
     TABLA_PRIMITIVAS,
     Tarea,
     VERSION,
@@ -33,6 +36,35 @@ from brooder.solicitudes import Solicitud
 RUTA_BASE = Path.cwd()
 RUTA_SSD_DEFECTO = RUTA_BASE / "ssd" / "brooder.img"
 RUTA_ENTRENAMIENTO_DEFECTO = RUTA_BASE / "entrenamiento"
+
+
+# ------------------------------------------------------------------
+# robustez de consola (Windows)
+# ------------------------------------------------------------------
+def _asegurar_consola() -> None:
+    """Endurece stdout/stderr frente a consolas sin UTF-8.
+
+    PowerShell 5.1 (Windows) conecta la salida de los procesos externos a
+    través de una tubería, así que Python no usa la API Unicode de la consola
+    sino la página de código ANSI (cp1252 en español). Ahí los caracteres de
+    caja (``─``, ``│``, ``✔``…) no existen y el primer ``print`` que los
+    emita lanza ``UnicodeEncodeError``.
+
+    La salida de emergencia es degradar esos caracteres a ``?`` (modo
+    ``errors="replace"``) en lugar de romper la ejecución. Las consolas UTF-8
+    (Linux/macOS, Windows Terminal con ``PYTHONUTF8=1``…) no se tocan.
+    """
+    for flujo in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+        try:
+            if flujo is None:
+                continue
+            codificacion = (flujo.encoding or "").lower().replace("-", "")
+            if codificacion and codificacion != "utf8":
+                flujo.reconfigure(errors="replace")
+        except Exception:
+            # flujos sin reconfigure (StringIO capturado, tuberías raras…):
+            # no es un problema de este guard, seguimos sin romper nada.
+            pass
 
 
 # ------------------------------------------------------------------
@@ -56,6 +88,9 @@ def cmd_incubar(args) -> int:
     for tarea, exito in resumen["exito_eval_final"].items():
         marca = "✔" if exito >= 0.85 else "✘"
         print(f"  {marca} {tarea:10s} {exito:.0%}")
+    for tarea, tasa in resumen.get("trazado_eval_final", {}).items():
+        marca = "✔" if tasa >= 0.85 else "✘"
+        print(f"  {marca} trazado {tarea:6s} {tasa:.0%}  (REGISTRAR_LOG tras I/O)")
     print(f"  Mejor cerebro: {args.salida}/mejor.pt")
     print(f"  Siguiente paso: brooder exportar --desde {args.salida}/mejor.pt")
     return 0
@@ -78,6 +113,10 @@ def _cmd_exportar(args) -> int:
     if ruta_metricas.exists():
         ultimas = [json.loads(l) for l in ruta_metricas.read_text().splitlines() if l.strip()]
         metricas = ultimas[-1] if ultimas else {}
+        # la última línea suele ser el resumen final (métricas anidadas):
+        # se desanida para que el manifiesto y la demo las muestren
+        if "resumen_final" in metricas:
+            metricas = metricas["resumen_final"]
 
     salida = exportar_ssd(desde, args.salida, metricas=metricas)
     tamano_kb = salida.stat().st_size / 1024
@@ -91,7 +130,7 @@ def _cmd_exportar(args) -> int:
 # ------------------------------------------------------------------
 def cmd_arrancar(args) -> int:
     from brooder import pantalla
-    from brooder.nucleo import NucleoBrooder, montar_ssd
+    from brooder.nucleo import NucleoBrooder, aviso_contrato, montar_ssd
     from brooder.primitivas.reales import PCReal
     from brooder.primitivas.virtual import PCVirtual
 
@@ -125,6 +164,18 @@ def cmd_arrancar(args) -> int:
 
     # 3. POST + bienvenida
     pantalla.splash_bios(nucleo.post(), rapido=args.rapido)
+    # hotfix contrato: el desfase kernel/cerebro se explica ANTES de que
+    # el usuario vea [FALLO]s mudos en 'montar' (fallo real en campo:
+    # parche de Fase 1 aplicado sin copiar su imagen SSD).
+    aviso = aviso_contrato(cerebro)
+    if aviso:
+        print(pantalla.amarillo(f"Aviso: {aviso}."))
+        print(
+            pantalla.amarillo(
+                "  Copia la imagen SSD reentrenada que acompaña al parche "
+                "sobre ssd/brooder.img."
+            )
+        )
     print(f"Máquina: {tipo_maquina} | Cerebro: {origen}")
     print(f"Sistema: {estado.resumen()}")
     pantalla.banner_sesion()
@@ -151,13 +202,19 @@ def cmd_arrancar(args) -> int:
             if _bucle_recovery(nucleo, args):
                 break
             continue
+        if comando in (":pendrive", "pendrive", "usb"):
+            # Fase 1: hot-plug manual del monitor — el mundo exterior
+            # enchufa o retira el pendrive del conector USB virtual.
+            _toggle_pendrive(nucleo)
+            continue
 
         solicitud = Solicitud.desde_texto(linea)
         if solicitud is None:
             print(
                 pantalla.amarillo(
                     "No entendí la solicitud. Prueba 'HOLA', '3+5', "
-                    "'guardar 4 G', 'recordar 2 Z', 'aviso A' o :ayuda."
+                    "'guardar 4 G', 'recordar 2 Z', 'aviso A', 'montar' "
+                    "o :ayuda."
                 )
             )
             continue
@@ -170,6 +227,28 @@ def cmd_arrancar(args) -> int:
         estado.guardar(Path(args.sandbox) / "estado.json")
     print(f"Sesión cerrada. {estado.resumen()}.")
     return 0
+
+
+def _toggle_pendrive(nucleo) -> None:
+    """Fase 1: enchufa o retira el pendrive del conector (hot-plug)."""
+    from brooder import pantalla
+
+    maquina = nucleo.maquina
+    instante = maquina.instante()
+    if instante.dispositivo_conectado:
+        limpia = maquina.desconectar_dispositivo()
+        if limpia:
+            print("Conector USB: pendrive desconectado (estaba desmontado).")
+        else:
+            print(
+                pantalla.rojo(
+                    "Conector USB: pendrive retirado MONTADO -> "
+                    "extraccion insegura registrada por el kernel."
+                )
+            )
+    else:
+        maquina.conectar_dispositivo()
+        print("Conector USB: pendrive conectado. Pide 'montar' a la IA.")
 
 
 def _bucle_recovery(nucleo, args) -> bool:
@@ -225,12 +304,21 @@ def cmd_demo(args) -> int:
 
     pantalla.splash_bios(nucleo.post(), rapido=True)
     print(f"Máquina: {'REAL (sandbox)' if args.maquina_real else 'VIRTUAL'}")
-    if manifiesto.get("metricas", {}).get("exito_eval_final"):
+    metricas = manifiesto.get("metricas", {})
+    if metricas.get("exito_eval_final"):
         print(
             "Cerebro incubado: "
             + " | ".join(
                 f"{t} {v:.0%}"
-                for t, v in manifiesto["metricas"]["exito_eval_final"].items()
+                for t, v in metricas["exito_eval_final"].items()
+            )
+        )
+    if metricas.get("trazado_eval_final"):
+        print(
+            "Trazado del registro: "
+            + " | ".join(
+                f"{t} {v:.0%}"
+                for t, v in metricas["trazado_eval_final"].items()
             )
         )
     print()
@@ -238,10 +326,12 @@ def cmd_demo(args) -> int:
     print("─" * 66)
 
     exitos = 0
+    resultados = []
     for texto, _tarea in DEMO_SOLICITUDES:
         solicitud = Solicitud.desde_texto(texto)
         resultado = nucleo.atender_solicitud(solicitud)
         exitos += resultado.exito
+        resultados.append(resultado)
         pantalla.mostrar_resultado_solicitud(resultado, detallado=args.detallado)
 
     print("─" * 66)
@@ -249,12 +339,202 @@ def cmd_demo(args) -> int:
     marca = verde_local if exitos == total else amarillo_local
     print(f"  Resultado de la demo: {marca(f'{exitos}/{total} solicitudes resueltas')}")
     print(f"  {estado.resumen()}")
+
+    # --- macro-primitiva REGISTRAR_LOG (consola del kernel) -------
+    # Fase 0.5: el cerebro reentrenado traza por sí mismo. Durante
+    # las 7 solicitudes de arriba, cada REGISTRAR_LOG emitido por la
+    # política neuronal quedó anotado en resultado.trazos y en el
+    # anillo del kernel. Si el cerebro montado es del contrato viejo
+    # (17 salidas) o no trazó, se muestra la vía sintética de la
+    # Fase 0 (eventos emitidos por el propio núcleo).
+    trazos_totales = sum(len(r.trazos) for r in resultados)
+    print()
+    if trazos_totales:
+        print(
+            negrita_local(
+                "MACRO-PRIMITIVA: REGISTRAR_LOG — decisión propia del cerebro"
+            )
+        )
+        print("─" * 66)
+        for resultado in resultados:
+            if not resultado.trazos:
+                continue
+            mensajes = ", ".join(MENSAJES_LOG[m][1] for m in resultado.trazos)
+            print(
+                f"  {resultado.solicitud.descripcion():26s}"
+                f" {verde_local('trazó')}: {mensajes}"
+            )
+        print()
+        for linea in pantalla.render_panel_registro(nucleo.maquina.panel_registro()):
+            print(linea)
+        print()
+        print(
+            pantalla.tenue(
+                "  Eventos emitidos por la política neuronal (no por un "
+                "guion): el cerebro declara su I/O de almacenamiento."
+            )
+        )
+        print(
+            pantalla.tenue(
+                "  Anillo del kernel: retiene 8 entradas; el panel muestra "
+                "las 4 últimas."
+            )
+        )
+    else:
+        contrato = (
+            "el cerebro montado usa el contrato viejo (17 salidas): "
+            "no puede emitir REGISTRAR_LOG"
+            if cerebro.n_primitivas <= int(Primitiva.REGISTRAR_LOG)
+            else "el cerebro decidió no trazar en esta pasada"
+        )
+        print(negrita_local("MACRO-PRIMITIVA: REGISTRAR_LOG (consola del kernel)"))
+        print("─" * 66)
+        print(pantalla.tenue(f"  Sin trazos propios: {contrato}."))
+        print(pantalla.tenue("  Eventos sintéticos emitidos por el núcleo:"))
+        for mensaje in (3, 1, 2, 5, 7):
+            # 3 proceso iniciado | 1 lectura | 2 escritura | 5 aviso | 7 error
+            ok = nucleo.maquina.ejecutar(Primitiva.REGISTRAR_LOG, mensaje)
+            nucleo.maquina.avanzar_paso()
+            simbolo = verde_local("[ OK ]") if ok else pantalla.rojo("[FALLO]")
+            print(f"  {simbolo} registrar_log({mensaje})")
+        print()
+        for linea in pantalla.render_panel_registro(nucleo.maquina.panel_registro()):
+            print(linea)
+        print()
+        print(
+            pantalla.tenue(
+                "  Anillo del kernel: retiene 8 entradas; el panel muestra "
+                "las 4 últimas."
+            )
+        )
+    # --- Fase 1: pendrive virtual (hot-plug USB) --------------------
+    disp_ok = _demo_pendrive(nucleo, cerebro)
     if args.maquina_real:
         print(
             f"  El disco de Brooder persiste en: "
             f"{Path(args.sandbox) / 'disco'} (revísalo: son archivos reales)"
         )
-    return 0 if exitos == total else 1
+    return 0 if exitos == total and disp_ok else 1
+
+
+def _demo_pendrive(nucleo, cerebro) -> bool:
+    """Sección Fase 1 de la demo: el pendrive virtual (hot-plug USB).
+
+    El mundo exterior enchufa un pendrive; el cerebro percibe la
+    presencia en sus canales y decide montarlo. Después se pide una
+    "extracción segura" y decide desmontarlo. Por último, una
+    extracción FORZADA con el pendrive montado muestra la protección
+    del kernel: "extraccion insegura" queda registrada como ERROR
+    aunque la IA no haya reaccionado.
+
+    Devuelve True si el cerebro administró el dispositivo con éxito
+    (los cerebros del contrato viejo no pueden: la sección muestra
+    entonces la vía sintética del núcleo, como el REGISTRAR_LOG de la
+    Fase 0, y no cuenta para el código de salida).
+    """
+    from brooder import pantalla
+
+    print()
+    print(
+        negrita_local("DISPOSITIVO EXTERNO: el pendrive virtual (hot-plug)")
+    )
+    print("─" * 66)
+    maquina = nucleo.maquina
+    contrato_viejo = (
+        cerebro.dim_entrada < OBS_DIM or cerebro.n_primitivas < N_PRIMITIVAS
+    )
+
+    def _atender(modo: str) -> bool:
+        solicitud = Solicitud(Tarea.DISPOSITIVO, datos={"modo": modo})
+        resultado = nucleo.atender_solicitud(solicitud)
+        if resultado.exito:
+            print(
+                f"  {verde_local('[ OK ]')} {modo:10s} -> decisión del "
+                f"cerebro ({resultado.ciclos} ciclos, "
+                f"{resultado.detalle_dispositivos})"
+            )
+        else:
+            print(
+                f"  {amarillo_local('[FALLO]')} {modo:10s} -> "
+                f"{resultado.causa} ({resultado.detalle_dispositivos})"
+            )
+        return resultado.exito
+
+    if contrato_viejo:
+        print(
+            pantalla.amarillo(
+                f"  Cerebro del contrato viejo ({cerebro.dim_entrada} entradas / "
+                f"{cerebro.n_primitivas} primitivas): no percibe el conector "
+                "USB. El ciclo lo ejecuta el núcleo."
+            )
+        )
+        print(
+            pantalla.amarillo(
+                "  Remedio: copia la imagen SSD reentrenada que acompaña "
+                "al parche sobre ssd/brooder.img."
+            )
+        )
+        maquina.conectar_dispositivo()
+        print("  [ > ] conector USB: pendrive conectado (evento externo)")
+        maquina.ejecutar(Primitiva.MONTAR_DISPOSITIVO, 0)
+        maquina.avanzar_paso()
+        print(f"  {verde_local('[ OK ]')} montado por el núcleo")
+        maquina.ejecutar(Primitiva.DESMONTAR_DISPOSITIVO, 0)
+        maquina.avanzar_paso()
+        print(f"  {verde_local('[ OK ]')} desmontado por el núcleo")
+        maquina.desconectar_dispositivo()
+        print("  [ > ] desconexión limpia")
+        maquina.conectar_dispositivo()
+        maquina.ejecutar(Primitiva.MONTAR_DISPOSITIVO, 0)
+        maquina.avanzar_paso()
+        maquina.desconectar_dispositivo()
+        print("  [ ! ] extracción forzada con el pendrive montado (kernel)")
+        return True
+
+    ok = True
+    # 1) hot-plug: el mundo exterior enchufa el pendrive
+    maquina.conectar_dispositivo()
+    print("  [ > ] conector USB: pendrive conectado (evento externo)")
+    # 2) la política percibe la presencia y decide montar
+    ok &= _atender("montar")
+    # 3) el monitor pide una extracción segura
+    print("  [ > ] el monitor pide extraer el pendrive de forma segura")
+    ok &= _atender("desmontar")
+    # 4) el mundo retira un pendrive ya desmontado: limpia
+    maquina.desconectar_dispositivo()
+    print(f"  {verde_local('[ OK ]')} desconexión limpia: se retiró desmontado")
+    # 5) reconexión y extracción FORZADA: la protección del kernel
+    maquina.conectar_dispositivo()
+    print("  [ > ] el pendrive se vuelve a conectar")
+    ok &= _atender("montar")
+    print("  [ ! ] extracción FORZADA sin desmontar (el mundo lo retira)")
+    maquina.desconectar_dispositivo()
+    print(
+        "      "
+        + pantalla.rojo(
+            "el kernel registra el ERROR: extraccion insegura"
+        )
+    )
+    print()
+    for linea in pantalla.render_panel_registro(maquina.panel_registro()):
+        print(linea)
+    print()
+    print(
+        pantalla.tenue(
+            "  Montar/desmontar son decisiones de la política neuronal; el"
+        )
+    )
+    print(
+        pantalla.tenue(
+            "  kernel las valida y anota su ciclo en el registro (dmesg). El"
+        )
+    )
+    print(
+        pantalla.tenue(
+            "  conector detecta la extracción insegura por sí mismo."
+        )
+    )
+    return ok
 
 
 def negrita_local(t):
@@ -275,17 +555,39 @@ def amarillo_local(t):
     return pantalla.amarillo(t)
 
 
+def rojo_local(t):
+    # hotfix contrato: faltaba desde el primer commit — cmd_diagnostico
+    # lanzaba NameError en cuanto una tarea caía por debajo del 85 %
+    # (la rama ✘ nunca se había ejecutado: las evidencias siempre dieron
+    # DOMINIO COMPLETO hasta el escenario de imagen antigua).
+    from brooder import pantalla
+
+    return pantalla.rojo(t)
+
+
 # ------------------------------------------------------------------
 # diagnostico
 # ------------------------------------------------------------------
 def cmd_diagnostico(args) -> int:
     from brooder.incubadora import evaluar
-    from brooder.nucleo import montar_ssd
+    from brooder.nucleo import aviso_contrato, montar_ssd
     from brooder.cerebro import CerebroBrooder
+    from brooder import pantalla
 
     if args.ssd and Path(args.ssd).exists():
         cerebro, _, manifiesto = montar_ssd(args.ssd)
         print(f"Imagen SSD: {args.ssd}")
+        # hotfix contrato: explicar por qué DISPOSITIVO va a fallar antes
+        # de la evaluación (y no con un [FALLO] mudo).
+        aviso = aviso_contrato(cerebro)
+        if aviso:
+            print(pantalla.amarillo(f"Aviso: {aviso}."))
+            print(
+                pantalla.amarillo(
+                    "  Copia la imagen SSD reentrenada que acompaña al "
+                    "parche sobre ssd/brooder.img."
+                )
+            )
         print(f"Fecha de incubación: {manifiesto.get('fecha', '?')}")
         pasos = manifiesto.get("pasos_entrenamiento")
         if pasos:
@@ -297,12 +599,17 @@ def cmd_diagnostico(args) -> int:
     print()
     print("Evaluación determinista por tarea "
           f"({args.solicitudes} solicitudes/tarea):")
-    resultados = evaluar(cerebro, list(Tarea), n_solicitudes=args.solicitudes)
+    resultados, trazado = evaluar(
+        cerebro, list(Tarea), n_solicitudes=args.solicitudes, con_trazado=True
+    )
     todo_ok = True
     for tarea, exito in sorted(resultados.items()):
         marca = verde_local("✔") if exito >= 0.85 else rojo_local("✘")
         todo_ok &= exito >= 0.85
-        print(f"  {marca} {tarea:10s} {exito:.0%}")
+        extra = ""
+        if tarea in trazado:
+            extra = f"   trazado del registro: {trazado[tarea]:.0%}"
+        print(f"  {marca} {tarea:10s} {exito:.0%}{extra}")
     print()
     print("Veredicto:", verde_local("DOMINIO COMPLETO") if todo_ok
           else amarillo_local("dominio parcial"))
@@ -458,6 +765,7 @@ def construir_parser() -> argparse.ArgumentParser:
 
 
 def principal(argv=None) -> int:
+    _asegurar_consola()
     parser = construir_parser()
     args = parser.parse_args(argv)
     try:

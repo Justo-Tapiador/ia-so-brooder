@@ -72,18 +72,20 @@ instruction of a modern CPU".
 
 ## Results
 
-The brain included in `ssd/brooder.img` was incubated **from scratch**
-with `brooder incubar`: 784,513 PPO steps, ~14 min on an ordinary CPU,
-no GPU. Deterministic evaluation on **100 fresh requests per task**,
-verified by the hardware itself:
+The brain included in `ssd/brooder.img` is the same one from Fase 0.5,
+**transplanted** into the new contract (perception 21→24 inputs,
+primitives 18→20 outputs: see `docs/dispositivo-virtual.md`) and refined
+to 1,975,637 total PPO steps, no GPU. Deterministic evaluation on
+**240 fresh requests per task**, verified by the hardware itself:
 
 | Task | What Brooder must do | Success |
 |------|----------------------|---------|
 | `ECO` (echo) | read the keyboard and repeat it on screen | **100 %** |
 | `SUMA` (add) | read two digits, add them **with the CPU** and show the result | **100 %** |
-| `GUARDAR` (save) | store a value on the **disk** and retrieve it | **100 %** |
-| `RECORDAR` (recall) | same, but in **RAM** | **100 %** |
+| `GUARDAR` (save) | store a value on the **disk** and retrieve it | **100 %** (tracing 97 %) |
+| `RECORDAR` (recall) | same, but in **RAM** | **100 %** (tracing 100 %) |
 | `AVISO` (alert) | show a character and **beep** upon reading the alarm | **100 %** |
+| `DISPOSITIVO` (device) | mount/unmount the **virtual pendrive** according to its state | **100 %** |
 
 None of this is hand-programmed: **the neural network decides the
 sequence of primitives at every cycle**. It does not even imitate the
@@ -128,6 +130,22 @@ ls brooder_sandbox/disco/    # 0.tok ... 9.tok: slot 4 contains 'G'
 > The repository ships the already-incubated SSD image
 > (`ssd/brooder.img`, 262 KiB): you can boot the AI-OS without training
 > anything.
+
+### Windows: `?` characters in the demo or UnicodeEncodeError
+
+PowerShell 5.1 pipes the output of external processes, so Python falls
+back to the ANSI code page (cp1252) instead of UTF-8. Box-drawing
+characters (`─`, `│`, `✔`) don't exist there. Since the console hotfix
+the CLI degrades them to `?` instead of crashing, so the demo always
+completes. To see the full formatting, run this first:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8 = "1"
+```
+
+(Or launch `brooder demo` from `cmd.exe`, which uses the console's
+Unicode API and needs nothing.)
 
 ---
 
@@ -279,8 +297,54 @@ includes **argument types**:
 | 14 | `reproducir_audio(f)` (play audio) | free | emits a beep |
 | 15 | `usar_gpu()` (use gpu) | — | composes a new frame (clears the screen) |
 | 16 | `leer_red()` (read network) | — | **disabled** in v1 (controlled error) |
+| 17 | `registrar_log(m)` (log) | message 0-10 | appends an entry to the system registry (kernel console) |
+| 18 | `montar_dispositivo()` (mount device) | — | mounts the pendrive on the virtual USB port |
+| 19 | `desmontar_dispositivo()` (unmount device) | — | safe removal: releases the mounted pendrive |
 
 *(Run `brooder primitivas` to see this table in your terminal.)*
+
+`registrar_log` is the first **macro-primitive** and the seed of
+Brooder's "syscalls": system-level actions the AI decides on and the
+kernel executes as trusted code. The registry is a *dmesg*-style ring
+—it retains the last 8 entries and persists across requests— and its
+message vocabulary is closed (11 ids from the `MENSAJES_LOG` table):
+the AI chooses *which* event to declare; it never dictates free text.
+Since **Fase 0.5** the incubated brain *traces on its own*: the training
+environment rewards declaring each disk/RAM write or read with the
+correct message at the right moment, and the demo section
+`REGISTRAR_LOG — decisión propia del cerebro` shows the events the
+neural policy itself emitted while serving real requests. Brains
+incubated with older contracts (17 or 18 outputs) keep mounting
+unchanged (the demo detects the contract and falls back to the
+kernel's synthetic route; see `docs/registro-sistema.md`).
+
+**Fase 1 — the virtual pendrive.** Primitives 18 and 19 manage an
+external device that appears and disappears *hot*: the outside world
+connects/disconnects the pendrive (there is no primitive for that —
+the AI cannot plug hardware, only administer what is there) and the
+policy senses the port through three new observation channels
+(presence, mounted, device request). The kernel logs the lifecycle to
+its registry like a real *dmesg*: mount and unmount leave INFO entries;
+if the world pulls the pendrive out **while mounted**, the kernel
+records the "extraccion insegura" ERROR on its own. The demo's
+`DISPOSITIVO EXTERNO` section shows the whole cycle — including the
+brain's own decision. The interactive session allows it by hand:
+`:pendrive` plugs/unplugs, and the requests `montar` / `desmontar` are
+posed to the AI. Design and contract compatibility:
+`docs/dispositivo-virtual.md`.
+
+**Contract hotfix (Fase 1, post-release).** Born from a real field
+mishap: applying the Fase 1 patch without copying its SSD image leaves
+a legacy-contract brain (21×18) mounted on a kernel that speaks 24×20.
+Booting is LEGAL — prefix compatibility guarantees it — but `montar`
+failed in silence: the brain's heads never emit ids ≥ n_primitivas.
+Now the POST declares the mounted contract (`[ OK ] Cerebro contrato
+24x20` / `[ AVISO ] … (imagen antigua)`), and `arrancar`, `demo` and
+`diagnostico` explain the mismatch and its remedy before the first
+[FALLO] appears. As a bonus, `rojo_local` was repaired: it had been
+missing since the first commit, and `brooder diagnostico` crashed the
+moment a task fell below 85 % (the ✘ branch had never run until then).
+Suite: 112/112 (106 + 6 new tests in `tests/test_contrato.py`).
 
 The **data bus** is the heart of the design: data primitives only accept
 the value that has already been read onto the bus. You cannot "show"
@@ -410,6 +474,12 @@ pytest -q   # 43 tests: primitives, environment, oracle, brain, kernel, SSD, san
 
 ## Roadmap
 
+- [x] ~~Fase 0: system registry (`REGISTRAR_LOG`) and Fase 0.5: the
+      brain traces on its own.~~
+- [x] ~~Fase 1: external hot-plug device (virtual pendrive,
+      `montar`/`desmontar`).~~
+- [ ] Real storage on the mounted pendrive: read/write device data
+      once accepted (Fase 1.5).
 - [ ] More tokens and multi-line screens; screen editing.
 - [ ] New tasks over the existing primitives: SUBTRACTION, file chains,
       disk search, periodic alarms.

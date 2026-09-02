@@ -71,18 +71,21 @@ entienda todas las instrucciones de una CPU moderna».
 
 ## Resultados
 
-El cerebro incluido en `ssd/brooder.img` se incubó **desde cero** con
-`brooder incubar`: 784.513 pasos de PPO, ~14 min en una CPU corriente,
-sin GPU. Evaluación determinista sobre **100 solicitudes nuevas por
-tarea**, verificadas por el propio hardware:
+El cerebro incluido en `ssd/brooder.img` es el mismo de la Fase 0.5,
+**trasplantado** al contrato nuevo (percepción 21→24 entradas,
+primitivas 18→20 salidas: ver `docs/dispositivo-virtual.md`) y refinado
+hasta 1.975.637 pasos totales de PPO, sin GPU. Evaluación determinista
+sobre **240 solicitudes nuevas por tarea**, verificadas por el propio
+hardware:
 
 | Tarea | ¿Qué debe hacer Brooder? | Éxito |
 |-------|--------------------------|-------|
 | `ECO` | leer el teclado y repetirlo en pantalla | **100 %** |
 | `SUMA` | leer dos dígitos, sumarlos **con la CPU** y mostrar el resultado | **100 %** |
-| `GUARDAR` | almacenar un valor en el **disco** y recuperarlo | **100 %** |
-| `RECORDAR` | igual, pero en la **RAM** | **100 %** |
+| `GUARDAR` | almacenar un valor en el **disco** y recuperarlo | **100 %** (trazado 97 %) |
+| `RECORDAR` | igual, pero en la **RAM** | **100 %** (trazado 100 %) |
 | `AVISO` | mostrar un carácter y **pitar** al leer la alarma | **100 %** |
+| `DISPOSITIVO` | montar/desmontar el **pendrive virtual** según su estado | **100 %** |
 
 Nada de esto está programado a mano: **la red neuronal decide la
 secuencia de primitivas en cada ciclo**. Ni siquiera imita el «programa
@@ -126,6 +129,22 @@ ls brooder_sandbox/disco/    # 0.tok ... 9.tok: la ranura 4 contiene 'G'
 
 > El repositorio incluye la imagen SSD ya incubada (`ssd/brooder.img`,
 > 262 KiB): puedes arrancar la IA-SO sin entrenar nada.
+
+### Windows: caracteres `?` en la demo o UnicodeEncodeError
+
+PowerShell 5.1 conecta la salida de los procesos externos mediante una
+tubería, por lo que Python usa la página de código ANSI (cp1252) en lugar
+de UTF-8. Ahí los caracteres de caja (`─`, `│`, `✔`) no existen. Desde el
+hotfix de consola el CLI los degrada a `?` en vez de romperse, así que la
+demo termina siempre. Para verla con su formato completo, ejecuta antes:
+
+```powershell
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONUTF8 = "1"
+```
+
+(También puedes lanzar `brooder demo` desde `cmd.exe`, que usa la API
+Unicode de la consola y no necesita nada.)
 
 ---
 
@@ -278,8 +297,55 @@ ejecuta. Como los `syscalls` de un kernel clásico, el contrato incluye
 | 14 | `reproducir_audio(f)` | libre | emite un pitido |
 | 15 | `usar_gpu()` | — | compone un frame nuevo (vacía la pantalla) |
 | 16 | `leer_red()` | — | **desactivada** en v1 (error controlado) |
+| 17 | `registrar_log(m)` | mensaje 0-10 | añade una entrada al registro del sistema (consola del kernel) |
+| 18 | `montar_dispositivo()` | — | monta el pendrive del conector USB virtual |
+| 19 | `desmontar_dispositivo()` | — | extracción segura: libera el pendrive montado |
 
 *(Ejecuta `brooder primitivas` para ver esta tabla en tu terminal.)*
+
+`registrar_log` es la primera **macro-primitiva** y el germen de las
+«syscalls» de Brooder: acciones de nivel de sistema que la IA decide y
+el núcleo ejecuta como código de confianza. El registro es un anillo a lo
+*dmesg* —retiene las últimas 8 entradas y persiste entre solicitudes— y su
+vocabulario de mensajes es cerrado (11 ids de la tabla `MENSAJES_LOG`): la
+IA elige *qué* evento declarar, nunca dicta texto libre. Desde la
+**Fase 0.5** el cerebro incubado *traza por sí mismo*: el entorno premia
+declarar cada escritura/lectura de disco o RAM con el mensaje correcto
+en el momento oportuno, y la sección
+`REGISTRAR_LOG — decisión propia del cerebro` de la demo muestra los
+eventos que la política neuronal emitió durante las solicitudes reales.
+Los cerebros incubados con contratos anteriores (17 o 18 salidas)
+siguen montando sin cambios (la demo detecta el contrato y muestra la
+vía sintética del núcleo; ver `docs/registro-sistema.md`).
+
+**Fase 1 — el pendrive virtual.** Las primitivas 18 y 19 administran un
+dispositivo externo que aparece y desaparece *en caliente*: el mundo
+exterior conecta/desconecta el pendrive (no hay primitiva para ello —
+la IA no puede enchufar hardware, solo administrar lo que hay) y la
+política percibe el conector en tres canales nuevos de su observación
+(presencia, montado, solicitud de dispositivo). El ciclo de vida queda
+anotado por el kernel en su registro como un *dmesg* real: montar y
+desmontar dejan INFO; si el mundo retira el pendrive **montado**, el
+kernel registra el ERROR «extraccion insegura» por sí mismo. La sección
+`DISPOSITIVO EXTERNO` de la demo muestra el ciclo completo — decisión
+propia del cerebro incluida. La sesión interactiva lo permite a mano:
+`:pendrive` enchufa/retira, y las solicitudes `montar` / `desmontar` se
+las planteas a la IA. Diseño y compatibilidad de contratos:
+`docs/dispositivo-virtual.md`.
+
+**Hotfix de contrato (Fase 1, post-entrega).** Nació de un tropiezo
+real en campo: aplicar el parche de la Fase 1 sin copiar su imagen SSD
+deja montado un cerebro del contrato viejo (21×18) en un kernel que
+habla 24×20. El arranque es LEGAL —la compatibilidad de prefijo lo
+garantiza— pero `montar` fallaba en silencio: las cabezas del cerebro
+nunca emiten ids ≥ n_primitivas. Ahora el POST declara el contrato
+montado (`[ OK ] Cerebro contrato 24x20` / `[ AVISO ] … (imagen
+antigua)`), y `arrancar`, `demo` y `diagnostico` explican el desfase y
+su remedio antes de que aparezca el primer [FALLO]. De regalo, se
+reparó `rojo_local`: faltaba desde el primer commit y
+`brooder diagnostico` crasheaba en cuanto una tarea caía por debajo
+del 85 % (rama ✘ nunca ejecutada hasta entonces). Suite: 112/112
+(106 + 6 tests nuevos en `tests/test_contrato.py`).
 
 El **bus de datos** es el corazón del diseño: las primitivas de datos
 solo aceptan el valor que ya ha sido leído en el bus. No se puede
@@ -408,6 +474,12 @@ pytest -q   # 43 tests: primitivas, entorno, oráculo, cerebro, núcleo, SSD, sa
 
 ## Hoja de ruta
 
+- [x] ~~Fase 0: registro del sistema (`REGISTRAR_LOG`) y Fase 0.5: el
+      cerebro traza por decisión propia.~~
+- [x] ~~Fase 1: dispositivo externo con hot-plug (pendrive virtual,
+      `montar`/`desmontar`).~~
+- [ ] Almacenamiento real en el pendrive montado: leer/escribir datos
+      del dispositivo una vez aceptado (Fase 1.5).
 - [ ] Más tokens y pantallas de varias líneas; edición de pantalla.
 - [ ] Tareas nuevas sobre las primitivas existentes: RESTA, cadenas de
       archivos, búsqueda en disco, alarmas periódicas.

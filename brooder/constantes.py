@@ -76,6 +76,9 @@ PRESUPUESTO_CICLOS = {
     "GUARDAR": 26,
     "RECORDAR": 26,
     "AVISO": 20,
+    # administrar el pendrive es una decisión de 1 ciclo; el
+    # presupuesto da margen para explorar sin ser infinito
+    "DISPOSITIVO": 12,
 }
 
 
@@ -96,22 +99,34 @@ class Tarea(IntEnum):
     GUARDAR = 2    # almacenar un valor en el disco y recuperarlo
     RECORDAR = 3   # igual que GUARDAR pero en la RAM
     AVISO = 4      # mostrar un carácter y pitar al leer ALARMA
+    DISPOSITIVO = 5  # Fase 1: atender el pendrive virtual del conector
 
 
 N_TAREAS = len(Tarea)
 NOMBRES_TAREAS = [t.name for t in Tarea]
 
 # Currículo de la incubadora: cada etapa añade tareas nuevas sin
-# abandonar las anteriores (retención).
+# abandonar las anteriores (retención). La etapa 5 (Fase 1) añade la
+# administración del dispositivo externo: el pendrive se conecta por
+# hot-plug y la política debe decidir montarlo/desmontarlo.
 CURRICULO = [
     [Tarea.ECO],
     [Tarea.ECO, Tarea.SUMA],
     [Tarea.ECO, Tarea.SUMA, Tarea.GUARDAR, Tarea.RECORDAR],
     [Tarea.ECO, Tarea.SUMA, Tarea.GUARDAR, Tarea.RECORDAR, Tarea.AVISO],
+    [Tarea.ECO, Tarea.SUMA, Tarea.GUARDAR, Tarea.RECORDAR, Tarea.AVISO,
+     Tarea.DISPOSITIVO],
 ]
 
-# Alfabeto reducido para generalizar más rápido (10 letras).
-LETRAS_ENTRENAMIENTO = list(range(TOKEN_A, TOKEN_A + 10))  # 'A'..'J'
+# Alfabeto de entrenamiento: TODO el vocabulario de letras (A..Z).
+# El diseño original usaba solo 10 letras para acelerar el
+# aprendizaje y confiaba en que las tareas son agnósticas al valor
+# (el dato viaja por el bus). La Fase 0.5 demostró que esa apuesta
+# se rompe cuando la política aprende comportamientos nuevos: el
+# cerebro con trazado fallaba o spameaba con valores fuera de A..J
+# (p. ej. 'guardar 3 Z'). Entrenar con las 26 letras cierra el hueco
+# de generalización sin coste apreciable.
+LETRAS_ENTRENAMIENTO = list(range(TOKEN_A, TOKEN_Z + 1))  # 'A'..'Z'
 
 
 # ============================================================
@@ -143,6 +158,28 @@ class Primitiva(IntEnum):
     REPRODUCIR_AUDIO = 14    # emite un pitido
     USAR_GPU = 15            # refresca el frame compuesto (reservado)
     LEER_RED = 16            # bus <- siguiente paquete de red
+
+    # --- primera macro-primitiva ("syscall") ------------------------
+    # Las primitivas 0..16 son operaciones MICRO de un solo ciclo.
+    # REGISTRAR_LOG inaugura la familia de macro-primitivas: acciones
+    # de nivel de sistema que el agente decide y el núcleo ejecuta
+    # como código de confianza. Su valor se añade AL FINAL del enum
+    # para no renumerar los ids existentes: los cerebros incubados
+    # con el contrato viejo (17 salidas) siguen montando sin cambios
+    # —simplemente no pueden emitir esta primitiva hasta reentrenar.
+    REGISTRAR_LOG = 17       # añade una entrada al registro del sistema
+
+    # --- Fase 1: ciclo de vida del dispositivo externo ---------------
+    # Segunda y tercera macro-primitivas: montar/desmontar el pendrive
+    # del conector USB virtual. Igual que REGISTRAR_LOG, se añaden AL
+    # FINAL del enum: los cerebros con el contrato viejo (18 salidas)
+    # siguen montando (sus cabezas no pueden emitir ids >= 18) hasta
+    # reentrenar/migrar el contrato.
+    # NOTA: la conexión/desconexión física (hot-plug) NO es una
+    # primitiva: es un evento del mundo exterior que el kernel aplica
+    # directamente — la IA solo decide qué hacer con lo que hay.
+    MONTAR_DISPOSITIVO = 18    # monta el pendrive presente en el conector
+    DESMONTAR_DISPOSITIVO = 19  # desmonta limpio (libera el pendrive)
 
 
 N_PRIMITIVAS = len(Primitiva)
@@ -245,7 +282,81 @@ TABLA_PRIMITIVAS = {
         "leer_red()", False,
         "Lee el siguiente paquete de red (desactivado en v1: devuelve error)."
     ),
+    Primitiva.REGISTRAR_LOG: InfoPrimitiva(
+        "registrar_log(m)", True,
+        "Añade una entrada al registro del sistema (m = id de MENSAJES_LOG). "
+        "El panel de registro es la consola del kernel.", "mensaje"
+    ),
+    Primitiva.MONTAR_DISPOSITIVO: InfoPrimitiva(
+        "montar_dispositivo()", False,
+        "Monta el pendrive del conector USB. Solo el cerebro decide "
+        "cuándo; el kernel valida que haya dispositivo y no esté ya "
+        "montado. El montaje queda anotado en el registro (dmesg).",
+    ),
+    Primitiva.DESMONTAR_DISPOSITIVO: InfoPrimitiva(
+        "desmontar_dispositivo()", False,
+        "Desmonta el pendrive de forma limpia (extracción segura). "
+        "El desmontaje queda anotado en el registro del sistema.",
+    ),
 }
+
+
+# ------------------------------------------------------------------
+# REGISTRO DEL SISTEMA (consola del kernel)
+# ------------------------------------------------------------------
+# La primera macro-primitiva necesita un vocabulario cerrado de
+# mensajes: el agente emite un id, el núcleo ejecuta el registro.
+# Mantener el vocabulario en una tabla (y no en cadenas libres) es la
+# misma política de seguridad del resto del contrato: nada de lo que
+# la IA emite se interpreta como texto arbitrario.
+MENSAJES_LOG = (
+    ("INFO", "listo"),
+    ("INFO", "lectura completada"),
+    ("INFO", "escritura completada"),
+    ("INFO", "proceso iniciado"),
+    ("AVISO", "disco ocupado"),
+    ("AVISO", "bus saturado"),
+    ("ERROR", "direccion invalida"),
+    ("ERROR", "dispositivo no listo"),
+    # --- Fase 1: ciclo de vida del pendrive -------------------------
+    # El kernel anota automáticamente estas líneas al ejecutar
+    # montar/desmontar y al detectar una extracción insegura: son la
+    # traza "dmesg" del dispositivo, EMITIDA POR EL KERNEL (no hace
+    # falta que la IA las declare; su REGISTRAR_LOG sigue siendo para
+    # declarar su propia I/O). Sin acentos, como el resto del
+    # vocabulario, por seguridad de codificación en consolas.
+    ("INFO", "dispositivo montado"),
+    ("INFO", "dispositivo desmontado"),
+    ("ERROR", "extraccion insegura"),
+)
+N_MENSAJES_LOG = len(MENSAJES_LOG)
+
+# Ids canónicos para el TRAZADO de operaciones de almacenamiento
+# (Fase 0.5): tras escribir en disco/RAM el mensaje esperado es el 2
+# ("escritura completada") y tras leer, el 1 ("lectura completada").
+# El entorno de entrenamiento premia exactamente esa correspondencia:
+# la política aprendida no solo emite REGISTRAR_LOG, sino que declara
+# el evento QUE TOCA. Los ids son posiciones de MENSAJES_LOG.
+MENSAJE_LOG_LECTURA = 1
+MENSAJE_LOG_ESCRITURA = 2
+
+# Ids del ciclo de vida del pendrive (Fase 1), anotados por el KERNEL
+MENSAJE_LOG_DISP_MONTADO = 8
+MENSAJE_LOG_DISP_DESMONTADO = 9
+MENSAJE_LOG_EXTRACCION_INSEGURA = 10
+
+# El registro es un anillo a lo dmesg: las entradas viejas se pierden
+# cuando llega una nueva. Persiste entre solicitudes (es la consola
+# del sistema, no un registro volátil del proceso) y solo se vacía
+# en un arranque en frío.
+REGISTRO_CAPACIDAD = 8      # entradas retenidas en el anillo
+REGISTRO_PANEL_LINEAS = 4   # líneas visibles del panel en la TUI
+
+
+def formatear_registro(paso: int, mensaje: int) -> str:
+    """Entrada (paso, id_mensaje) -> línea legible del panel."""
+    nivel, texto = MENSAJES_LOG[mensaje]
+    return f"[{paso:04d}] {nivel:>5}| {texto}"
 
 
 # ------------------------------------------------------------------
@@ -270,6 +381,11 @@ def mascara_argumentos() -> list:
             m[ARG_BUS] = True
         elif tipo == "libre":
             m = [True] * N_ARGUMENTOS
+        elif tipo == "mensaje":
+            # REGISTRAR_LOG: solo ids de la tabla de mensajes; el resto
+            # de tokens siempre sería rechazado por la máquina
+            for i in range(N_MENSAJES_LOG):
+                m[i] = True
         else:  # "ninguno": el argumento se ignora; una sola opción
             m[0] = True
         mascaras.append(m)
@@ -283,8 +399,20 @@ MASCARA_ARGUMENTOS = mascara_argumentos()
 # 5. DIMENSIONES DE OBSERVACIÓN Y ACCIÓN
 # ============================================================
 # Vector de percepción (ver brooder/percepcion.py):
-#   tarea one-hot (5) + 16 señales escalares.
-OBS_DIM = N_TAREAS + 16
+#   one-hot de las tareas CLÁSICAS (5) + 16 señales escalares
+#   + 3 canales del dispositivo externo (Fase 1).
+#
+# La tarea DISPOSITIVO NO entra en el one-hot: usa su canal escalar
+# propio AL FINAL del vector (disp_tarea). Motivo: el contrato de
+# percepción se EXTIENDE POR EL FINAL — las 21 primeras posiciones
+# son bit a bit las del contrato viejo, así que un cerebro incubado
+# con OBS_DIM=21 percibe exactamente lo que percibía: el núcleo
+# recorta la observación a dim_entrada del cerebro montado (ver
+# nucleo.NucleoBrooder e incubadora.evaluar). Es la misma política
+# de compatibilidad que añadir primitivas AL FINAL del enum.
+N_TAREAS_CLASICAS = 5      # ECO..AVISO (la tarea DISPOSITIVO va aparte)
+N_CANALES_DISPOSITIVO = 3  # disp_tarea | disp_conectado | disp_montado
+OBS_DIM = N_TAREAS_CLASICAS + 16 + N_CANALES_DISPOSITIVO
 
 # Espacio de acción factorizado:
 #   acción = (primitiva, argumento)

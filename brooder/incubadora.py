@@ -42,8 +42,59 @@ from brooder.cerebro import (
     enmascarar_logits_argumento,
     entropia_conjunta,
 )
-from brooder.constantes import CURRICULO, OBS_DIM, Tarea
+from brooder.constantes import CURRICULO, N_PRIMITIVAS, OBS_DIM, Tarea
 from brooder.entorno import EntornoBrooder
+
+
+# ------------------------------------------------------------------
+# migración de contrato (Fase 1)
+# ------------------------------------------------------------------
+def expandir_estado_contrato(
+    estado_viejo: dict, dim_vieja: int, prims_viejas: int
+) -> dict:
+    """"Trasplante": cerebro del contrato viejo -> contrato actual.
+
+    Extiende los tensores que cambian de forma cuando el contrato
+    crece (Fase 1: percepción 21 -> 24 y primitivas 18 -> 20):
+
+    * ``codificador.0.weight``: las columnas nuevas (canales de
+      percepción) se añaden a CERO. Con los canales nuevos en 0.0 —
+      exactamente como están en las tareas clásicas — la salida del
+      codificador es IDÉNTICA a la del cerebro viejo: cero regresión
+      de partida.
+    * ``cabeza_primitiva.weight/bias``: las filas nuevas
+      (MONTAR/DESMONTAR) se añaden a 0 con sesgo -4.0: las
+      macro-primitivas nuevas arrancan fuertemente desfavorecidas y
+      solo ganan masa cuando PPO encuentre recompensa en ellas (el
+      bonus de novedad del entorno se encarga de que se muestreen).
+    * ``embebido_primitiva.weight``: filas nuevas a cero.
+
+    El estado de Adam NO migra (sus formas cambian): se descarta y
+    Adam se recalienta en unos cientos de pasos, que es precisamente
+    el régimen de un fine-tuning.
+    """
+    plantilla = CerebroBrooder()  # contrato actual: OBS_DIM x N_PRIMITIVAS
+    nuevo = {}
+    for nombre, tensor in estado_viejo.items():
+        if nombre == "codificador.0.weight":
+            w = torch.zeros_like(plantilla.codificador[0].weight)
+            w[:, :dim_vieja] = tensor
+            nuevo[nombre] = w
+        elif nombre == "cabeza_primitiva.weight":
+            w = torch.zeros_like(plantilla.cabeza_primitiva.weight)
+            w[:prims_viejas, :] = tensor
+            nuevo[nombre] = w
+        elif nombre == "cabeza_primitiva.bias":
+            b = torch.full_like(plantilla.cabeza_primitiva.bias, -4.0)
+            b[:prims_viejas] = tensor
+            nuevo[nombre] = b
+        elif nombre == "embebido_primitiva.weight":
+            w = torch.zeros_like(plantilla.embebido_primitiva.weight)
+            w[:prims_viejas, :] = tensor
+            nuevo[nombre] = w
+        else:
+            nuevo[nombre] = tensor
+    return nuevo
 
 
 # ------------------------------------------------------------------
@@ -65,6 +116,11 @@ class ConfiguracionPPO:
     coef_entropia: float = 0.02
     coef_entropia_exploracion: float = 0.05  # mientras haya tareas sin resolver
     umbral_exploracion: float = 0.50          # éxito mínimo para dejar de explorar
+    umbral_trazado: float = 0.70              # trazado mínimo para dar por
+                                               # integrada la syscall (Fase 0.5)
+    umbral_exploracion_trazado: float = 0.20  # semilla mínima de trazado en
+                                               # eval determinista: por debajo,
+                                               # explorar; por encima, consolidar
     max_grad_norm: float = 0.5
     semilla: int = 1234
     eval_cada: int = 12_000
@@ -127,9 +183,22 @@ def evaluar(
     tareas,
     n_solicitudes: int = 60,
     semilla: int = 99_999,
-) -> dict:
-    """Mide el éxito de la política (determinista) por tarea."""
+    con_trazado: bool = False,
+):
+    """Mide el éxito de la política (determinista) por tarea.
+
+    Con ``con_trazado=True`` devuelve además la tasa de trazado del
+    registro (Fase 0.5): fracción de operaciones de almacenamiento
+    que la política declaró con REGISTRAR_LOG, con el mensaje
+    correcto y en el momento oportuno.
+
+    Soporta cerebros del contrato viejo (dim_entrada < OBS_DIM): la
+    observación se recorta al prefijo que el cerebro conoce (ver
+    constantes.OBS_DIM). Un cerebro viejo evalúa las tareas clásicas
+    como siempre; la tarea DISPOSITIVO le queda invisible y falla.
+    """
     cerebro.eval()
+    dim = getattr(cerebro, "dim_entrada", OBS_DIM)
     entorno = EntornoBrooder(tareas_activas=list(tareas), semilla=semilla)
     for tarea in tareas:
         entorno.fijar_tareas([tarea])
@@ -138,10 +207,16 @@ def evaluar(
             h, M = cerebro.estado_inicial()
             terminada = False
             while not terminada:
-                obs_t = torch.tensor(obs, dtype=torch.float32)
+                obs_t = torch.tensor(obs[:dim], dtype=torch.float32)
                 prim, arg, _, h, M = cerebro.decidir(obs_t, h, M, determinista=True)
                 obs, _, terminada, _ = entorno.paso(prim, arg)
-    return {t: v[0] for t, v in entorno.tasa_exito().items()}
+    exito = {t: v[0] for t, v in entorno.tasa_exito().items()}
+    if con_trazado:
+        trazado = {
+            t: v[0] for t, v in entorno.tasa_trazado().items()
+        }
+        return exito, trazado
+    return exito
 
 
 # ------------------------------------------------------------------
@@ -182,6 +257,7 @@ class Incubadora:
         self.mejor_exito = -1.0
         self.convergido = False
         self._coef_entropia_actual = self.cfg.coef_entropia
+        self._trazado_explorar = False  # lo fija cada eval determinista
         self.ruta_metricas = self.dir_salida / "metricas.jsonl"
 
         # semilla de evaluación distinta de la de entrenamiento
@@ -398,14 +474,37 @@ class Incubadora:
     # --------------------------------------------------
     # evaluación y currículo
     # --------------------------------------------------
-    def _evaluar_etapa(self) -> dict:
+    def _evaluar_etapa(self) -> tuple:
+        """Devuelve (exito_por_tarea, trazado_por_tarea)."""
         tareas = CURRICULO[self.etapa]
         return evaluar(
             self.cerebro,
             tareas,
             n_solicitudes=self.cfg.solicitudes_eval,
             semilla=self._semilla_eval,
+            con_trazado=True,
         )
+
+    def _etapa_con_almacenamiento(self) -> bool:
+        """¿La etapa actual incluye tareas con I/O de almacenamiento?"""
+        return any(
+            t in (Tarea.GUARDAR, Tarea.RECORDAR) for t in CURRICULO[self.etapa]
+        )
+
+    def _trazado_integrado(self, trazado_eval: dict) -> bool:
+        """¿La política integra el trazado del registro (Fase 0.5)?
+
+        En etapas sin almacenamiento no hay nada que integrar. Desde
+        que el currículo introduce GUARDAR/RECORDAR, la convergencia
+        exige además declarar esa I/O: una incubación "completa"
+        produce un cerebro que resuelve Y traza.
+        """
+        if not self._etapa_con_almacenamiento():
+            return True
+        for tarea in ("GUARDAR", "RECORDAR"):
+            if trazado_eval.get(tarea, 0.0) < self.cfg.umbral_trazado:
+                return False
+        return True
 
     def _guardar(self, nombre: str, exito_medio: float | None = None) -> Path:
         ruta = self.dir_salida / nombre
@@ -427,6 +526,13 @@ class Incubadora:
 
         Devuelve el paso global guardado. Permite incubar en varias
         sesiones: 'brooder incubar' + 'brooder incubar --reanudar'.
+
+        Fase 1 — migración de contrato: si el checkpoint pertenece al
+        contrato viejo (percepción o primitivas más pequeñas que las
+        actuales), se hace el TRASPLANTE (expandir_estado_contrato):
+        el mismo cerebro, con espacio para los canales y primitivas
+        nuevos, conservando intacto todo lo aprendido. El estado de
+        Adam se descarta al migrar (sus formas cambian).
         """
         # weights_only=True: los checkpoints propios solo contienen
         # config, pesos y el estado de Adam (tensores y escalares);
@@ -434,9 +540,24 @@ class Incubadora:
         paquete = torch.load(
             ruta, map_location=self.dispositivo, weights_only=True
         )
-        self.cerebro.load_state_dict(paquete["estado"])
-        if "optimizador" in paquete:  # checkpoints antiguos: sin estado de Adam
-            self.optimizador.load_state_dict(paquete["optimizador"])
+        config = paquete.get("config", {})
+        dim_vieja = int(config.get("dim_entrada", OBS_DIM))
+        prims_viejas = int(config.get("n_primitivas", N_PRIMITIVAS))
+        if dim_vieja < OBS_DIM or prims_viejas < N_PRIMITIVAS:
+            estado = expandir_estado_contrato(
+                paquete["estado"], dim_vieja, prims_viejas
+            )
+            self.cerebro.load_state_dict(estado)
+            self._log(
+                f"Migración de contrato: cerebro de {dim_vieja} entradas / "
+                f"{prims_viejas} primitivas -> {OBS_DIM} / {N_PRIMITIVAS} "
+                "(trasplante; el estado de Adam se descarta)."
+            )
+            # Adam no migra: se recalienta durante el fine-tuning
+        else:
+            self.cerebro.load_state_dict(paquete["estado"])
+            if "optimizador" in paquete:  # checkpoints antiguos: sin estado de Adam
+                self.optimizador.load_state_dict(paquete["optimizador"])
         self.paso_global = paquete.get("paso", 0)
         self.etapa = paquete.get("etapa", 0)
         self.entorno.fijar_tareas(CURRICULO[min(self.etapa, len(CURRICULO) - 1)])
@@ -487,10 +608,16 @@ class Incubadora:
             # aprendido y dejar de muestrear las primitivas nuevas
             # (exploración muerta). Se eleva el incentivo de entropía
             # hasta que todas las tareas activas superan el umbral.
+            # Fase 0.5, segunda lección: la entropía alta también
+            # IMPIDE consolidar el trazado — mantiene la política
+            # plana y el argmax nunca gana masa. La exploración por
+            # trazado se decide en la eval determinista: si la semilla
+            # del trazado ya existe (>= umbral_exploracion_trazado),
+            # se suelta la entropía y PPO consolida la semilla.
             min_exito = min(exito_ent.values()) if exito_ent else 0.0
             self._coef_entropia_actual = (
                 self.cfg.coef_entropia_exploracion
-                if min_exito < self.cfg.umbral_exploracion
+                if min_exito < self.cfg.umbral_exploracion or self._trazado_explorar
                 else self.cfg.coef_entropia
             )
 
@@ -509,14 +636,32 @@ class Incubadora:
                 or self.paso_global >= self.cfg.pasos_totales
             ):
                 ultimo_eval = self.paso_global
-                exito_eval = self._evaluar_etapa()
+                exito_eval, trazado_eval = self._evaluar_etapa()
+                # Fase 0.5: ¿explorar o consolidar el trazado? La
+                # semilla debe existir en la política DETERMINISTA:
+                # medirla con la política estocástica es engañoso (la
+                # entropía diluye el muestreo y subestima lo que el
+                # argmax ya sabe hacer).
+                self._trazado_explorar = (
+                    self._etapa_con_almacenamiento()
+                    and any(
+                        trazado_eval.get(t, 0.0) < self.cfg.umbral_exploracion_trazado
+                        for t in ("GUARDAR", "RECORDAR")
+                    )
+                )
                 tareas_vistas = CURRICULO[self.etapa]
                 exito_medio = sum(exito_eval.values()) / len(exito_eval)
-                self._log(
+                linea_eval = (
                     f"  ↳ EVAL: "
                     + " | ".join(f"{t} {exito_eval[t]:.0%}" for t in exito_eval)
                     + f"  (media {exito_medio:.0%})"
                 )
+                # Fase 0.5: el trazado del registro acompaña al éxito
+                if trazado_eval:
+                    linea_eval += "  | trazado " + " ".join(
+                        f"{t} {trazado_eval[t]:.0%}" for t in sorted(trazado_eval)
+                    )
+                self._log(linea_eval)
 
                 # mejor checkpoint global
                 if exito_medio > self.mejor_exito:
@@ -530,6 +675,13 @@ class Incubadora:
                     "exito_entrenamiento": exito_ent,
                     "exito_eval": {k: round(v, 4) for k, v in exito_eval.items()},
                     "exito_medio_eval": round(exito_medio, 4),
+                    "trazado_eval": {
+                        k: round(v, 4) for k, v in trazado_eval.items()
+                    },
+                    "trazado_entrenamiento": round(
+                        self.entorno.tasa_trazado_ventana(), 4
+                    ),
+                    "explorando_trazado": self._trazado_explorar,
                     "perdida_politica": round(stats["perdida_politica"], 5),
                     "perdida_valor": round(stats["perdida_valor"], 5),
                     "tareas_evaluadas": [t.name for t in tareas_vistas],
@@ -547,15 +699,28 @@ class Incubadora:
                         )
                         # re-evaluar con el repertorio ampliado
                         ultimo_eval = self.paso_global
-                    elif self.cfg.parar_al_converger:
+                    elif self.cfg.parar_al_converger and self._trazado_integrado(
+                        trazado_eval
+                    ):
                         self.convergido = True
                         self._log(
                             "  ★ CONVERGIDO: todas las tareas dominadas "
                             f"(media {exito_medio:.0%}). Incubación completa."
                         )
+                    elif self.cfg.parar_al_converger:
+                        self._log(
+                            "  ★ Tareas dominadas; el trazado del registro "
+                            "aún no está integrado ("
+                            + " | ".join(
+                                f"{t} {trazado_eval.get(t, 0.0):.0%}"
+                                for t in ("GUARDAR", "RECORDAR")
+                                if t in trazado_eval or self._etapa_con_almacenamiento()
+                            )
+                            + "). Entropía de exploración activa."
+                        )
 
         # guardado final
-        exito_final = self._evaluar_etapa()
+        exito_final, trazado_final = self._evaluar_etapa()
         exito_medio = sum(exito_final.values()) / max(1, len(exito_final))
         if exito_medio >= self.mejor_exito:
             self.mejor_exito = exito_medio
@@ -568,6 +733,9 @@ class Incubadora:
             "convergido": self.convergido,
             "exito_eval_final": {k: round(v, 4) for k, v in exito_final.items()},
             "exito_medio_final": round(exito_medio, 4),
+            "trazado_eval_final": {
+                k: round(v, 4) for k, v in trazado_final.items()
+            },
             "segundos": round(time.time() - t_inicio, 1),
             "dispositivo": str(self.dispositivo),
         }
@@ -576,4 +744,9 @@ class Incubadora:
             "Incubación terminada: "
             + " | ".join(f"{t} {v:.0%}" for t, v in exito_final.items())
         )
+        if trazado_final:
+            self._log(
+                "Trazado del registro (REGISTRAR_LOG): "
+                + " | ".join(f"{t} {v:.0%}" for t, v in trazado_final.items())
+            )
         return resumen

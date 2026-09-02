@@ -62,9 +62,15 @@ def test_solicitudes_son_coherentes(rng):
         for _ in range(50):
             s = Solicitud.aleatoria(tarea, rng)
             assert s.tarea == tarea
-            assert len(s.tokens) > 0
             assert s.presupuesto > 0
-            assert s.esperado  # toda tarea tiene salida esperada
+            if tarea == Tarea.DISPOSITIVO:
+                # evento de hardware: sin teclado y sin salida esperada
+                assert s.tokens == []
+                assert s.esperado == []
+                assert s.datos["modo"] in ("montar", "desmontar")
+            else:
+                assert len(s.tokens) > 0
+                assert s.esperado  # toda tarea clásica tiene salida esperada
 
 
 def test_solicitud_desde_texto():

@@ -81,15 +81,30 @@ ALTO_PANTALLA = 6     # líneas visibles
 # BIOS / POST
 # ------------------------------------------------------------------
 def splash_bios(comprobaciones, dispositivo: str = "CPU", rapido: bool = False):
-    """Secuencia de arranque (POST + montaje del SSD)."""
+    """Secuencia de arranque (POST + montaje del SSD).
+
+    Cada comprobación es (nombre, detalle) o (nombre, detalle, nivel)
+    con nivel == "aviso" para el estado amarillo (p. ej. el cerebro
+    montado habla un contrato antiguo). La etiqueta ocupa ancho fijo
+    ([ OK    ] / [ AVISO ]) para que las columnas alineen.
+    """
     lineas = [
         negrita(cian(f"{NOMBRE_PROYECTO} BIOS v{VERSION}")),
         tenue("(c) Proyecto IA-SO Brooder — licencia MIT"),
         "",
         "POST (Power-On Self Test):",
     ]
-    for nombre, detalle in comprobaciones:
-        lineas.append(f"  [ {verde('OK')} ] {nombre:24s} {detalle}")
+    for comprobacion in comprobaciones:
+        nombre, detalle = comprobacion[0], comprobacion[1]
+        nivel = comprobacion[2] if len(comprobacion) > 2 else "ok"
+        if nivel == "aviso":
+            etiqueta, color = "AVISO", amarillo
+        else:
+            etiqueta, color = "OK", verde
+        detalle_final = amarillo(detalle) if nivel == "aviso" else detalle
+        lineas.append(
+            f"  [ {color(f'{etiqueta:5s}')} ] {nombre:24s} {detalle_final}"
+        )
     lineas += [
         "",
         f"Dispositivo de inferencia: {negrita(dispositivo)}",
@@ -147,6 +162,12 @@ def render_monitor(
 ) -> list:
     """El panel de monitor del sistema."""
     ancho = 44
+    if instante.dispositivo_montado:
+        pendrive = "conectado y montado"
+    elif instante.dispositivo_conectado:
+        pendrive = "conectado (sin montar)"
+    else:
+        pendrive = "vacio"
     lineas = [
         f"Tarea actual      : {negrita(tarea)}",
         f"Ciclo             : {ciclo}/{presupuesto}",
@@ -156,12 +177,24 @@ def render_monitor(
         f"CPU acumulador    : {instante.acumulador}",
         f"Disco cabezal     : {instante.disco_cabezal}",
         f"RAM puntero       : {instante.memoria_puntero}",
+        f"Pendrive          : {pendrive}",
         f"Teclado pendiente : {instante.teclado_pendientes} tokens",
         f"Ultimo evento     : {instante.ultimo_evento[:26] or '-'}",
     ]
     if estado_sistema:
         lineas.append(tenue(estado_sistema[:38]))
     return caja("MONITOR DEL SISTEMA", lineas, ancho)
+
+
+def render_panel_registro(lineas: list, ancho: int = 44) -> list:
+    """La consola del kernel: últimas entradas del registro del sistema."""
+    return caja("REGISTRO DEL SISTEMA", lineas, ancho)
+
+
+def mostrar_registro(maquina) -> None:
+    """Imprime el panel de registro de la máquina dada."""
+    for linea in render_panel_registro(maquina.panel_registro()):
+        print(linea)
 
 
 def mostrar_resultado_solicitud(resultado, detallado: bool = False) -> None:
@@ -218,7 +251,9 @@ def ayuda_interactiva() -> None:
     print("  guardar 4 G    -> escribirá G en la ranura 4 del disco y la recuperará")
     print("  recordar 2 Z   -> igual, pero en la RAM")
     print("  aviso A        -> mostrará A y pitará al leer la alarma")
-    print(tenue("  Comandos: :ayuda  :recovery  :salir"))
+    print("  montar         -> montará el pendrive del conector (si lo hay)")
+    print("  desmontar      -> liberará el pendrive de forma segura")
+    print(tenue("  Comandos: :pendrive (enchufa/retira el USB)  :ayuda  :recovery  :salir"))
     print()
 
 

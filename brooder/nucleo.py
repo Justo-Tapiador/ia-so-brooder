@@ -32,8 +32,11 @@ import torch
 
 from brooder.cerebro import CerebroBrooder
 from brooder.constantes import (
+    N_PRIMITIVAS,
+    OBS_DIM,
     TABLA_PRIMITIVAS,
     Tarea,
+    Primitiva,
     tokens_a_texto,
 )
 from brooder.estado import EstadoBrooder, RegistroSolicitud
@@ -54,6 +57,10 @@ class ResultadoSolicitud:
     eventos: list = field(default_factory=list)
     primitivas_usadas: int = 0
     detalle_dispositivos: str = ""
+    # Fase 0.5: ids de mensaje REGISTRAR_LOG que el CEREBRO decidió
+    # emitir durante la atención (vacío si no trazó). Es la evidencia
+    # de que la política reentrenada usa su consola de kernel.
+    trazos: list = field(default_factory=list)
 
 
 class NucleoBrooder:
@@ -78,6 +85,12 @@ class NucleoBrooder:
     def post(self) -> list:
         """Power-On Self Test: comprobaciones de la máquina."""
         instante = self.maquina.instante()
+        if instante.dispositivo_montado:
+            pendrive = "conectado y montado"
+        elif instante.dispositivo_conectado:
+            pendrive = "conectado (sin montar)"
+        else:
+            pendrive = "vacío (hot-plug)"
         comprobaciones = [
             ("CPU (acumulador)", "lista"),
             ("RAM", f"{len(instante.memoria_contenido)} ranuras"),
@@ -86,7 +99,22 @@ class NucleoBrooder:
             ("Teclado", "conectado"),
             ("Audio", "conectado"),
             ("Red", "desactivada por seguridad"),
+            ("Conector USB", pendrive),
         ]
+        # hotfix contrato (Fase 1): el POST declara qué contrato habla el
+        # cerebro montado. Arrancar un cerebro del contrato viejo es
+        # LEGAL (compatibilidad de prefijo: sus tareas clásicas siguen
+        # al 100 %), pero el hardware nuevo le es invisible y la sesión
+        # interactiva devolvería [FALLO]s sin explicación. Nació de un
+        # fallo real en campo: parche aplicado sin copiar la imagen SSD.
+        salidas = getattr(self.cerebro, "n_primitivas", N_PRIMITIVAS)
+        entradas = getattr(self.cerebro, "dim_entrada", OBS_DIM)
+        if aviso_contrato(self.cerebro) is None:
+            comprobaciones.append(("Cerebro", f"contrato {entradas}x{salidas}"))
+        else:
+            comprobaciones.append(
+                ("Cerebro", f"contrato {entradas}x{salidas} (imagen antigua)", "aviso")
+            )
         return comprobaciones
 
     # --------------------------------------------------
@@ -100,19 +128,29 @@ class NucleoBrooder:
 
         ciclos_restantes = solicitud.presupuesto
         eventos = []
+        trazos = []
         primitivas_usadas = 0
         causa = "presupuesto_agotado"
 
         # estado del cerebro nuevo para cada solicitud (idéntico al
         # entrenamiento: cada solicitud es un "proceso" fresco)
         h, M = self.cerebro.estado_inicial()
+        # compatibilidad de prefijo (Fase 1): un cerebro montado del
+        # contrato viejo conoce solo las primeras dim_entrada
+        # posiciones de la observación — que son bit a bit las del
+        # contrato con el que se incubó. Las tareas clásicas le
+        # llegan intactas; la de dispositivo le es invisible.
+        dim_obs = getattr(self.cerebro, "dim_entrada", OBS_DIM)
 
         while ciclos_restantes > 0:
             instante = self.maquina.instante()
             obs = construir_observacion(
                 instante, solicitud.tarea, solicitud, ciclos_restantes
             )
-            obs_t = torch.tensor(obs, dtype=torch.float32)
+            # (el getattr cubre cerebros de prueba sin el atributo)
+            obs_t = torch.tensor(
+                obs[:dim_obs], dtype=torch.float32
+            )
 
             try:
                 prim, arg, _, h, M = self.cerebro.decidir(
@@ -127,6 +165,10 @@ class NucleoBrooder:
             self.maquina.avanzar_paso()
             ciclos_restantes -= 1
             primitivas_usadas += 1
+
+            # Fase 0.5: contabiliza el trazado decidido por el cerebro
+            if prim == Primitiva.REGISTRAR_LOG:
+                trazos.append(arg)
 
             if self.registro_eventos:
                 eventos.append(
@@ -148,6 +190,7 @@ class NucleoBrooder:
             pantalla=tokens_a_texto(instante.pantalla),
             eventos=eventos,
             primitivas_usadas=primitivas_usadas,
+            trazos=trazos,
         )
         self._anotar(resultado, instante)
         return resultado
@@ -166,6 +209,13 @@ class NucleoBrooder:
                 detalle.append(f"ram[{K}]='{tokens_a_texto([valor])}'")
         if resultado.solicitud.tarea == Tarea.AVISO:
             detalle.append(f"pitidos={len(instante.pitidos)}")
+        if resultado.solicitud.tarea == Tarea.DISPOSITIVO:
+            if instante.dispositivo_montado:
+                detalle.append("pendrive=montado")
+            elif instante.dispositivo_conectado:
+                detalle.append("pendrive=conectado sin montar")
+            else:
+                detalle.append("pendrive=ausente")
         resultado.detalle_dispositivos = " ".join(detalle)
 
         self.estado.anotar_solicitud(
@@ -199,6 +249,40 @@ class NucleoBrooder:
             "arranques": self.estado.arranques,
             "version": self.estado.version,
         }
+
+
+# ------------------------------------------------------------------
+# desfase kernel/cerebro (hotfix contrato, Fase 1)
+# ------------------------------------------------------------------
+def aviso_contrato(cerebro) -> str | None:
+    """Describe el desfase entre este kernel y el cerebro montado.
+
+    Un cerebro incubado con el contrato viejo (menos primitivas o
+    menos canales de percepción que el kernel actual) arranca sin
+    problemas gracias a la compatibilidad de prefijo, pero no puede
+    decidir sobre el hardware nuevo: sus cabezas nunca emiten ids
+    >= n_primitivas y los canales del dispositivo quedan fuera de su
+    ventana de percepción. ``arrancar``, ``demo`` y ``diagnostico``
+    usan este aviso para explicar el desfase y su remedio ANTES de
+    que el usuario vea [FALLO]s sin causa aparente.
+    """
+    salidas = getattr(cerebro, "n_primitivas", N_PRIMITIVAS)
+    entradas = getattr(cerebro, "dim_entrada", OBS_DIM)
+    faltan = [p.name for p in Primitiva if int(p) >= salidas]
+    if not faltan and entradas >= OBS_DIM:
+        return None
+    partes = []
+    if faltan:
+        partes.append(
+            f"no puede emitir {', '.join(faltan)} "
+            f"(primitivas {salidas}/{N_PRIMITIVAS})"
+        )
+    if entradas < OBS_DIM:
+        partes.append(
+            f"no percibe los canales del dispositivo "
+            f"(observación {entradas}/{OBS_DIM})"
+        )
+    return "el cerebro montado habla un contrato viejo: " + " y ".join(partes)
 
 
 # ------------------------------------------------------------------
