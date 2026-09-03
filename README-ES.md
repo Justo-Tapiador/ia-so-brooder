@@ -452,7 +452,7 @@ Verifica la imagen antes de arrancarla:
 
 ```bash
 sha256sum ssd/brooder.img
-# 5e9e66cbfa9679c7d62eaf3bfc8537fa22fbd3c138227110fadee5236d6b3590  brooder.img
+# 309890b5a456dbb5e991bda18cf30954df8b49c4cc4714c30b468097e0480865  brooder.img
 ```
 
 *(Actualiza ese hash si regeneras la imagen con `brooder exportar`;
