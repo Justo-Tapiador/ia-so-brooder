@@ -673,7 +673,9 @@ class MaquinaBase(InterfazPrimitivas):
         self._evento("desmontar_dispositivo: dispositivo desmontado")
         return True
 
-    def conectar_dispositivo(self, contenido: dict | None = None) -> bool:
+    def conectar_dispositivo(
+        self, contenido: dict | None = None, puntero: int | None = None
+    ) -> bool:
         """Hot-plug: el mundo exterior enchufa el pendrive (kernel).
 
         ``contenido`` (Fase 1.5) permite enchufar un pendrive que YA
@@ -681,6 +683,14 @@ class MaquinaBase(InterfazPrimitivas):
         de entrenamiento lo usa en las solicitudes de lectura, donde
         el valor a recuperar nunca pasa por el teclado y la única
         fuente posible es el propio dispositivo.
+
+        ``puntero`` (v0.4.0, fix OOD) deja el cursor del medio donde
+        lo dejó la sesión anterior: el mundo exterior que reenchufa
+        un pendrive usado no rebobina su cursor. Es la vía legítima
+        (lado mundo, no política) con la que el entrenamiento
+        aleatoriza el canal de observación [24] para que la política
+        aprenda a LEERLO en vez de asumir que nace en la ranura 0.
+        Ranuras fuera de rango se ignoran, igual que en ``contenido``.
         """
         if self._disp_conectado:
             self._error("conectar_dispositivo: ya hay dispositivo")
@@ -690,6 +700,8 @@ class MaquinaBase(InterfazPrimitivas):
             for ranura, token in contenido.items():
                 if 0 <= ranura < N_RANURAS_DISPOSITIVO and self._es_token_valido(token):
                     self._disp_ranuras[ranura] = token
+        if puntero is not None and 0 <= puntero < N_RANURAS_DISPOSITIVO:
+            self._disp_puntero = int(puntero)
         self._evento("conector USB: pendrive conectado")
         return True
 

@@ -84,8 +84,13 @@ regalar tiempo infinito.
 
 La recompensa de administración (`R_DISP_OK = 0.25`) solo existe en la
 tarea DISPOSITIVO — la misma lección anti-señuelo de la Fase 0.5: en
-las tareas clásicas el conector está vacío y `MONTAR`/`DESMONTAR`
-fracasan en la máquina pagando su ciclo, sin cultivar premio.
+las tareas clásicas el pendrive es **neutro en recompensa** y
+`MONTAR`/`DESMONTAR` fracasan en la máquina pagando su ciclo, sin
+cultivar premio. Desde v0.4.0 (fix OOD) el conector de una clásica
+puede nacer enchufado o montado con datos residuales durante el
+entrenamiento y la evaluación — sin recompensa y sin tocar las
+condiciones de éxito: ver
+[`variabilidad-conector.md`](variabilidad-conector.md).
 
 ### Compatibilidad de contratos: la observación se extiende por el final
 

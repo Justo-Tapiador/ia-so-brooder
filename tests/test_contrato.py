@@ -99,7 +99,12 @@ def test_diagnostico_con_tarea_fallida_devuelve_1_sin_crashear(
     """
     from brooder.cli import cmd_diagnostico
 
-    def _evaluar_fallando(cerebro, tareas, n_solicitudes, con_trazado):
+    # v0.4.0: evaluar creció con kwargs opcionales (semilla ya existía
+    # como parámetro posicional y ahora llega 'estado_conector' en el
+    # bloque de invarianza del diagnóstico); el fake los absorbe.
+    def _evaluar_fallando(
+        cerebro, tareas, n_solicitudes=2, con_trazado=False, **_
+    ):
         return {"DISPOSITIVO": 0.0}, {}
 
     monkeypatch.setattr("brooder.incubadora.evaluar", _evaluar_fallando)

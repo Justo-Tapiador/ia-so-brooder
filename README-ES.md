@@ -73,19 +73,27 @@ entienda todas las instrucciones de una CPU moderna».
 
 El cerebro incluido en `ssd/brooder.img` es el mismo de la Fase 0.5,
 **trasplantado** al contrato nuevo (percepción 21→24 entradas,
-primitivas 18→20 salidas: ver `docs/dispositivo-virtual.md`) y refinado
-hasta 1.975.637 pasos totales de PPO, sin GPU. Evaluación determinista
-sobre **240 solicitudes nuevas por tarea**, verificadas por el propio
-hardware:
+primitivas 18→20 salidas: ver `docs/dispositivo-virtual.md`), refinado
+hasta 1.975.637 pasos totales de PPO y **reencubado en v0.4.0 con
+variabilidad del conector** (+20.585 pasos: ver
+`docs/variabilidad-conector.md`). Evaluación determinista sobre
+solicitudes nuevas, verificadas por el propio hardware — ahora en
+cada estado del conector USB:
 
 | Tarea | ¿Qué debe hacer Brooder? | Éxito |
 |-------|--------------------------|-------|
 | `ECO` | leer el teclado y repetirlo en pantalla | **100 %** |
 | `SUMA` | leer dos dígitos, sumarlos **con la CPU** y mostrar el resultado | **100 %** |
-| `GUARDAR` | almacenar un valor en el **disco** y recuperarlo | **100 %** (trazado 97 %) |
-| `RECORDAR` | igual, pero en la **RAM** | **100 %** (trazado 100 %) |
+| `GUARDAR` | almacenar un valor en el **disco** y recuperarlo | **100 %** (trazado 91 %) |
+| `RECORDAR` | igual, pero en la **RAM** | **100 %** (trazado 91 %) |
 | `AVISO` | mostrar un carácter y **pitar** al leer la alarma | **100 %** |
 | `DISPOSITIVO` | montar/desmontar el **pendrive virtual** según su estado | **100 %** |
+
+**Invarianza del conector (v0.4.0):** las clásicas se resuelven al
+100 % con el pendrive **vacío, enchufado o montado con datos
+residuales** — el mínimo entre estados, no la media (la v0.3.0 caía al
+48 % con el pendrive montado; ver
+[`docs/variabilidad-conector.md`](docs/variabilidad-conector.md)).
 
 Nada de esto está programado a mano: **la red neuronal decide la
 secuencia de primitivas en cada ciclo**. Ni siquiera imita el «programa
@@ -122,7 +130,7 @@ brooder arrancar
 #   brooder> :recovery       <- menú de emergencia, independiente de la IA
 
 # (opcional) incubar tu propio cerebro y arrancarlo
-brooder incubar              # ~14 min en CPU; entrena las 5 tareas
+brooder incubar              # ~14 min en CPU; las 6 tareas con variabilidad del conector
 brooder exportar             # empaqueta entrenamiento/mejor.pt en ssd/brooder.img
 brooder demo                 # ahora la IA es tuya
 
@@ -532,8 +540,9 @@ solicitudes aleatorias. Si el entorno estuviera mal construido, el
 oráculo fallaría y el test lo delataría.
 
 ```bash
-pytest -q   # 137 tests: primitivas, entorno, oráculo, cerebro, núcleo,
-            # SSD, sandbox, dispositivo y su almacenamiento real
+pytest -q   # 182 tests: primitivas, entorno, oráculo, cerebro, núcleo,
+            # SSD, sandbox, dispositivo, trazado, sesión web y
+            # variabilidad del conector (invarianza OOD)
 ```
 
 ---
@@ -547,6 +556,11 @@ pytest -q   # 137 tests: primitivas, entorno, oráculo, cerebro, núcleo,
 - [x] ~~Fase 1.5: almacenamiento real en el pendrive montado —
       `escribir`/`leer` datos del dispositivo con trazado I/O propio,
       persistencia real y extracción insegura que pierde datos.~~
+- [x] ~~Fase 2: emulador web — la consola de la IA-SO en el navegador
+      (`py -m brooder servidor`).~~
+- [x] ~~v0.4.0: fix OOD — reencubación con variabilidad del conector:
+      las clásicas al 100 % con el pendrive en cualquier estado y
+      gate de invarianza en incubadora y diagnóstico.~~
 - [ ] Más tokens y pantallas de varias líneas; edición de pantalla.
 - [ ] Un «sistema de archivos» mínimo del pendrive (múltiples tokens por
       ranura, checksum), el paso natural tras las ranuras planas.

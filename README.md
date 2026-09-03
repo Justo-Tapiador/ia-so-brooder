@@ -74,18 +74,27 @@ instruction of a modern CPU".
 
 The brain included in `ssd/brooder.img` is the same one from Fase 0.5,
 **transplanted** into the new contract (perception 21→24 inputs,
-primitives 18→20 outputs: see `docs/dispositivo-virtual.md`) and refined
-to 1,975,637 total PPO steps, no GPU. Deterministic evaluation on
-**240 fresh requests per task**, verified by the hardware itself:
+primitives 18→20 outputs: see `docs/dispositivo-virtual.md`), refined
+to 1,975,637 total PPO steps and **re-incubated in v0.4.0 with
+connector variability** (+20,585 steps: see
+`docs/variabilidad-conector.md`, in Spanish). Deterministic evaluation
+on fresh requests, verified by the hardware itself — now on every
+state of the USB connector:
 
 | Task | What Brooder must do | Success |
 |------|----------------------|---------|
 | `ECO` (echo) | read the keyboard and repeat it on screen | **100 %** |
 | `SUMA` (add) | read two digits, add them **with the CPU** and show the result | **100 %** |
-| `GUARDAR` (save) | store a value on the **disk** and retrieve it | **100 %** (tracing 97 %) |
-| `RECORDAR` (recall) | same, but in **RAM** | **100 %** (tracing 100 %) |
+| `GUARDAR` (save) | store a value on the **disk** and retrieve it | **100 %** (tracing 91 %) |
+| `RECORDAR` (recall) | same, but in **RAM** | **100 %** (tracing 91 %) |
 | `AVISO` (alert) | show a character and **beep** upon reading the alarm | **100 %** |
 | `DISPOSITIVO` (device) | mount/unmount the **virtual pendrive** according to its state | **100 %** |
+
+**Connector invariance (v0.4.0):** the classic tasks are solved at
+100 % with the pendrive **empty, plugged or mounted with residual
+data** — the minimum across states, not the average (v0.3.0 dropped
+to 48 % with the pendrive mounted; see
+[`docs/variabilidad-conector.md`](docs/variabilidad-conector.md)).
 
 None of this is hand-programmed: **the neural network decides the
 sequence of primitives at every cycle**. It does not even imitate the
@@ -118,7 +127,7 @@ brooder arrancar
 #   brooder> :recovery       <- emergency menu, independent of the AI
 
 # (optional) incubate your own brain and boot it
-brooder incubar              # ~14 min on CPU; trains all 5 tasks
+brooder incubar              # ~14 min on CPU; all 6 tasks with connector variability
 brooder exportar             # packages entrenamiento/mejor.pt into ssd/brooder.img
 brooder demo                 # now the AI is yours
 
@@ -528,7 +537,9 @@ If the environment were badly built, the oracle would fail and the test
 would expose it.
 
 ```bash
-pytest -q   # 43 tests: primitives, environment, oracle, brain, kernel, SSD, sandbox
+pytest -q   # 182 tests: primitives, environment, oracle, brain, kernel,
+            # SSD, sandbox, device, tracing, web session and
+            # connector variability (OOD invariance)
 ```
 
 ---
@@ -542,6 +553,11 @@ pytest -q   # 43 tests: primitives, environment, oracle, brain, kernel, SSD, san
 - [x] ~~Fase 1.5: real storage on the mounted pendrive —
       `escribir`/`leer` device data with its own I/O trace, real
       persistence and unsafe extraction losing data.~~
+- [x] ~~Fase 2: web emulator — the AI-OS console in the browser
+      (`py -m brooder servidor`).~~
+- [x] ~~v0.4.0: OOD fix — re-incubation with connector variability:
+      classic tasks at 100 % with the pendrive in any state, plus an
+      invariance gate in the incubator and the diagnostic.~~
 - [ ] More tokens and multi-line screens; screen editing.
 - [ ] A minimal pendrive "file system" (multiple tokens per slot,
       checksum) — the natural step after flat slots.

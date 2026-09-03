@@ -43,8 +43,10 @@ import random
 
 from brooder.constantes import (
     ARG_BUS,
+    LETRAS_ENTRENAMIENTO,
     MENSAJE_LOG_LECTURA,
     MENSAJE_LOG_ESCRITURA,
+    N_RANURAS_DISPOSITIVO,
     TOKEN_ALARMA,
     Primitiva,
     Tarea,
@@ -117,6 +119,29 @@ _MENSAJE_POR_TIPO = {
 R_DISP_OK = 0.25
 TAREAS_DISPOSITIVO = (Tarea.DISPOSITIVO,)
 
+# --- variabilidad del conector (v0.4.0, fix OOD) --------------------
+# EL AGUJERO: hasta v0.3.0 las clásicas solo existían con el conector
+# VACÍO (el hot-plug era exclusivo de DISPOSITIVO), así que el cerebro
+# incubado jamás vio ECO/SUMA/GUARDAR/RECORDAR/AVISO con los canales
+# [22]-[25] activos: fuera de distribución (OOD). El cerebro publicado
+# v0.3.0 resolvía las clásicas al ~99 % con el conector vacío y al
+# 45 % con un pendrive montado con datos residuales.
+# EL FIX: el conector de las clásicas nace ahora en uno de los tres
+# estados legales en campo — vacío (mayoría), conectado sin montar o
+# montado con restos de una "sesión anterior" (1-3 ranuras A-Z y el
+# cursor donde lo dejó). El pendrive sigue SIN dar recompensa en las
+# clásicas (anti-señuelo): solo cambia la distribución de entradas;
+# las condiciones de éxito de las clásicas no tocan el dispositivo
+# (cirugía limpia: el oráculo sigue resolviendo el 100 %, ver tests).
+# En los episodios DISPOSITIVO el comportamiento es el histórico bit
+# a bit: el pendrive llega por contrato, no por azar.
+ESTADOS_CONECTOR = ("vacio", "conectado", "montado")
+ESTADO_CONECTOR_ALEATORIO = "aleatorio"
+P_CONECTOR_MONTADO = 0.30    # clásicas que nacen con el pendrive montado
+P_CONECTOR_CONECTADO = 0.10  # enchufado pero sin montar (hot-plug a medias)
+RANURAS_RESIDUALES_MIN = 1   # datos que "recuerda" el medio reenchufado
+RANURAS_RESIDUALES_MAX = 3
+
 # La curiosidad es una recompensa de exploración clásica (count-based
 # bonus): probar una primitiva que apenas se ha usado recibe un
 # pequeño premio 1/sqrt(n) que se extingue solo. Sin ella, una
@@ -126,12 +151,39 @@ TAREAS_DISPOSITIVO = (Tarea.DISPOSITIVO,)
 
 
 class EntornoBrooder:
-    """Entorno estilo Gymnasium sobre la máquina virtual."""
+    """Entorno estilo Gymnasium sobre la máquina virtual.
 
-    def __init__(self, tareas_activas=None, semilla: int | None = None):
+    ``estado_conector`` (v0.4.0, fix OOD) decide cómo nace el
+    conector USB en las solicitudes CLÁSICAS:
+
+    * ``None``      — comportamiento histórico: siempre vacío.
+    * ``"aleatorio"`` — sortea vacío/conectado/montado (60/10/30) con
+      datos residuales; el estado de ENTRENAMIENTO del fix.
+    * un estado concreto — lo fuerza; es el estado de EVALUACIÓN
+      (mide cada distribución por separado).
+
+    Los episodios DISPOSITIVO ignoran este parámetro: el pendrive
+    llega por contrato de la solicitud, no por azar.
+    """
+
+    def __init__(
+        self,
+        tareas_activas=None,
+        semilla: int | None = None,
+        estado_conector: str | None = None,
+    ):
+        if estado_conector is not None and estado_conector not in (
+            ESTADO_CONECTOR_ALEATORIO,
+            *ESTADOS_CONECTOR,
+        ):
+            raise ValueError(
+                "estado_conector debe ser None, 'aleatorio' o uno de "
+                f"{ESTADOS_CONECTOR}; recibido: {estado_conector!r}"
+            )
         self.maquina = PCVirtual()
         self.rng = random.Random(semilla)
         self.tareas_activas = list(tareas_activas or [Tarea.ECO])
+        self.estado_conector = estado_conector
         self.solicitud: Solicitud | None = None
         self.ciclos_restantes = 0
         # banderas de moldeado (se resetean por solicitud)
@@ -197,6 +249,15 @@ class EntornoBrooder:
             self.maquina.conectar_dispositivo(contenido=contenido)
             if modo != "montar":
                 self.maquina.montar_dispositivo()
+        elif self.estado_conector is not None:
+            # v0.4.0, fix OOD: las clásicas también conocen el
+            # conector — el mundo exterior puede haber dejado un
+            # pendrive enchufado (o montado, con sus datos) de la
+            # sesión anterior. Con estado_conector=None este bloque
+            # no se ejecuta NI consume azar: el comportamiento es el
+            # histórico bit a bit (mismo flujo del rng, mismos
+            # episodios con semilla fija).
+            self._enchufar_conector_clasica()
         self.ciclos_restantes = self.solicitud.presupuesto
         self._suma_moldeada = False
         self._escritura_moldeada = False
@@ -212,6 +273,41 @@ class EntornoBrooder:
         self._trazos_episodio = 0
         self._disp_moldeado = False
         return self.observar()
+
+    def _enchufar_conector_clasica(self) -> None:
+        """Deja el conector en el estado sorteado/forzado (clásicas).
+
+        "montado" — el pendrive de una sesión anterior, reenchufado y
+        montado, con 1-3 ranuras de datos A-Z y el cursor donde lo
+        dejaron; "conectado" — hot-plug a medias: presente pero sin
+        montar (el medio viaja vacío); "vacio" — nada que enchufar.
+        """
+        estado = self.estado_conector
+        if estado == ESTADO_CONECTOR_ALEATORIO:
+            dado = self.rng.random()
+            if dado < P_CONECTOR_MONTADO:
+                estado = "montado"
+            elif dado < P_CONECTOR_MONTADO + P_CONECTOR_CONECTADO:
+                estado = "conectado"
+            else:
+                estado = "vacio"
+        if estado == "vacio":
+            return
+        contenido = None
+        puntero = None
+        if estado == "montado":
+            n = self.rng.randint(RANURAS_RESIDUALES_MIN, RANURAS_RESIDUALES_MAX)
+            contenido = {
+                self.rng.randrange(N_RANURAS_DISPOSITIVO): self.rng.choice(
+                    LETRAS_ENTRENAMIENTO
+                )
+                for _ in range(n)
+            }
+            # el cursor NO se rebobina: la política debe leer [24]
+            puntero = self.rng.randrange(N_RANURAS_DISPOSITIVO)
+        self.maquina.conectar_dispositivo(contenido=contenido, puntero=puntero)
+        if estado == "montado":
+            self.maquina.montar_dispositivo()
 
     def observar(self) -> list:
         return construir_observacion(

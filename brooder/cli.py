@@ -77,6 +77,7 @@ def cmd_incubar(args) -> int:
         pasos_totales=args.pasos,
         semilla=args.semilla,
         parar_al_converger=not args.sin_parada,
+        conector_variable=not args.conector_fijo,
     )
     incubadora = Incubadora(cfg=cfg, dir_salida=args.salida)
     resumen = incubadora.entrenar(reanudar=args.reanudar)
@@ -91,6 +92,17 @@ def cmd_incubar(args) -> int:
     for tarea, tasa in resumen.get("trazado_eval_final", {}).items():
         marca = "✔" if tasa >= 0.85 else "✘"
         print(f"  {marca} trazado {tarea:6s} {tasa:.0%}  (REGISTRAR_LOG tras I/O)")
+    # v0.4.0, fix OOD: la invarianza del conector del cerebro recién
+    # incubado (cifra por estado = media de las clásicas ahí)
+    estados = resumen.get("exito_eval_estado_final") or {}
+    if estados:
+        print()
+        print("  Invarianza del conector (por estado del pendrive):")
+        for estado, fuente in estados.items():
+            if fuente:
+                media = sum(fuente.values()) / len(fuente)
+                marca = "✔" if media >= 0.85 else "✘"
+                print(f"  {marca} {estado:10s} media {media:.0%}")
     print(f"  Mejor cerebro: {args.salida}/mejor.pt")
     print(f"  Siguiente paso: brooder exportar --desde {args.salida}/mejor.pt")
     return 0
@@ -655,10 +667,46 @@ def cmd_diagnostico(args) -> int:
         if tarea in trazado:
             extra = f"   trazado del registro: {trazado[tarea]:.0%}"
         print(f"  {marca} {tarea:10s} {exito:.0%}{extra}")
+
+    # v0.4.0, fix OOD: invarianza del conector. Las clásicas deben
+    # resolverse IGUAL con el pendrive presente: aquí se VE el
+    # agujero OOD de un cerebro entrenado solo con el conector vacío
+    # (la v0.3.0 publicada caía al ~45 % con el pendrive montado) y
+    # aquí se certifica el fix tras la reencubación.
+    from brooder.entorno import ESTADOS_CONECTOR
+
+    clasicas = [t for t in Tarea if t != Tarea.DISPOSITIVO]
     print()
-    print("Veredicto:", verde_local("DOMINIO COMPLETO") if todo_ok
-          else amarillo_local("dominio parcial"))
-    return 0 if todo_ok else 1
+    print("Invarianza del conector (clásicas por estado del pendrive):")
+    invariante = True
+    for estado in ESTADOS_CONECTOR:
+        # con_trazado=True para mantener la forma (exito, trazado)
+        # de la llamada principal; el trazado por estado no se
+        # muestra: el de la tabla de tareas ya acompaña al éxito
+        resultados_estado, _ = evaluar(
+            cerebro,
+            clasicas,
+            n_solicitudes=args.solicitudes,
+            con_trazado=True,
+            estado_conector=estado,
+        )
+        if not resultados_estado:
+            continue
+        media_estado = sum(resultados_estado.values()) / len(resultados_estado)
+        marca = verde_local("✔") if media_estado >= 0.85 else rojo_local("✘")
+        invariante &= media_estado >= 0.85
+        print(f"  {marca} {estado:10s} media clásicas {media_estado:.0%}")
+
+    print()
+    if todo_ok and invariante:
+        print("Veredicto:", verde_local("DOMINIO COMPLETO"))
+    elif todo_ok:
+        print("Veredicto:", amarillo_local(
+            "dominio parcial: falla la invarianza del conector (OOD)"
+        ))
+    else:
+        print("Veredicto:", amarillo_local("dominio parcial"))
+    return 0 if (todo_ok and invariante) else 1
 
 
 # ------------------------------------------------------------------
@@ -769,6 +817,10 @@ def construir_parser() -> argparse.ArgumentParser:
                    help="continuar desde el último checkpoint de --salida")
     p.add_argument("--sin-parada", action="store_true",
                    help="no detenerse al converger")
+    p.add_argument("--conector-fijo", action="store_true",
+                   help="desactivar la variabilidad del conector en las "
+                        "clásicas y el gate de invarianza (comportamiento "
+                        "de v0.3.0; solo para reproducir el régimen viejo)")
     p.set_defaults(func=cmd_incubar)
 
     p = sub.add_parser("exportar", help="empaquetar el cerebro como imagen SSD")

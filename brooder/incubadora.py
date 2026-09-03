@@ -43,7 +43,12 @@ from brooder.cerebro import (
     entropia_conjunta,
 )
 from brooder.constantes import CURRICULO, N_PRIMITIVAS, OBS_DIM, Tarea
-from brooder.entorno import EntornoBrooder
+from brooder.entorno import (
+    EntornoBrooder,
+    ESTADO_CONECTOR_ALEATORIO,
+    ESTADOS_CONECTOR,
+    TAREAS_DISPOSITIVO,
+)
 
 
 # ------------------------------------------------------------------
@@ -129,6 +134,13 @@ class ConfiguracionPPO:
     umbral_etapa: float = 0.85
     parar_al_converger: bool = True
     imprimir_cada_rollouts: int = 4
+    # v0.4.0, fix OOD: entrenar con variabilidad del conector en las
+    # clásicas y exigir el GATE DE INVARIANZA en la evaluación — cada
+    # clásica debe superarse en los TRES estados del conector
+    # (vacío/conectado/montado) para avanzar de etapa o converger.
+    # --conector-fijo ('incubar') lo apaga para reproducir el
+    # comportamiento de v0.3.0.
+    conector_variable: bool = True
 
 
 # ------------------------------------------------------------------
@@ -185,6 +197,7 @@ def evaluar(
     n_solicitudes: int = 60,
     semilla: int = 99_999,
     con_trazado: bool = False,
+    estado_conector: str | None = None,
 ):
     """Mide el éxito de la política (determinista) por tarea.
 
@@ -193,6 +206,14 @@ def evaluar(
     que la política declaró con REGISTRAR_LOG, con el mensaje
     correcto y en el momento oportuno.
 
+    ``estado_conector`` (v0.4.0, fix OOD) fuerza el estado del
+    conector USB durante las solicitudes CLÁSICAS ("vacio",
+    "conectado", "montado"): mide cada distribución por separado —
+    el agujero OOD de un cerebro se ve comparando los tres. ``None``
+    mantiene el comportamiento histórico (clásicas con conector
+    vacío). Los episodios DISPOSITIVO no se ven afectados: el
+    pendrive llega por contrato de la solicitud.
+
     Soporta cerebros del contrato viejo (dim_entrada < OBS_DIM): la
     observación se recorta al prefijo que el cerebro conoce (ver
     constantes.OBS_DIM). Un cerebro viejo evalúa las tareas clásicas
@@ -200,7 +221,10 @@ def evaluar(
     """
     cerebro.eval()
     dim = getattr(cerebro, "dim_entrada", OBS_DIM)
-    entorno = EntornoBrooder(tareas_activas=list(tareas), semilla=semilla)
+    entorno = EntornoBrooder(
+        tareas_activas=list(tareas), semilla=semilla,
+        estado_conector=estado_conector,
+    )
     for tarea in tareas:
         entorno.fijar_tareas([tarea])
         for _ in range(n_solicitudes):
@@ -251,7 +275,14 @@ class Incubadora:
         torch.manual_seed(self.cfg.semilla)
 
         self.entorno = EntornoBrooder(
-            tareas_activas=CURRICULO[0], semilla=self.cfg.semilla
+            tareas_activas=CURRICULO[0],
+            semilla=self.cfg.semilla,
+            # v0.4.0, fix OOD: las clásicas nacen con el conector en
+            # uno de sus tres estados legales (60/10/30). Con
+            # conector_variable=False el flujo es el de v0.3.0.
+            estado_conector=(
+                ESTADO_CONECTOR_ALEATORIO if self.cfg.conector_variable else None
+            ),
         )
         self.etapa = 0
         self.paso_global = 0
@@ -259,6 +290,9 @@ class Incubadora:
         self.convergido = False
         self._coef_entropia_actual = self.cfg.coef_entropia
         self._trazado_explorar = False  # lo fija cada eval determinista
+        # v0.4.0: detalle de la última evaluación por estado del
+        # conector (para el registro de métricas y la línea de log)
+        self.detalle_eval_estado: dict = {}
         self.ruta_metricas = self.dir_salida / "metricas.jsonl"
 
         # semilla de evaluación distinta de la de entrenamiento
@@ -476,15 +510,65 @@ class Incubadora:
     # evaluación y currículo
     # --------------------------------------------------
     def _evaluar_etapa(self) -> tuple:
-        """Devuelve (exito_por_tarea, trazado_por_tarea)."""
+        """Devuelve (exito_por_tarea, trazado_por_tarea).
+
+        v0.4.0, fix OOD — GATE DE INVARIANZA: con conector_variable,
+        cada clásica se evalúa en los TRES estados del conector y la
+        cifra que ve el currículo es el MÍNIMO entre estados: avanzar
+        o converger exige resolver ECO igual de bien con un pendrive
+        montado (con datos residuales) que con el conector vacío.
+        DISPOSITIVO se evalúa a solas: sus episodios traen el pendrive
+        por contrato. El detalle por estado queda en
+        ``self.detalle_eval_estado`` (registro de métricas). Con
+        conector_variable=False la evaluación es la histórica.
+        """
         tareas = CURRICULO[self.etapa]
-        return evaluar(
-            self.cerebro,
-            tareas,
-            n_solicitudes=self.cfg.solicitudes_eval,
-            semilla=self._semilla_eval,
-            con_trazado=True,
-        )
+        if not self.cfg.conector_variable:
+            self.detalle_eval_estado = {}
+            return evaluar(
+                self.cerebro,
+                tareas,
+                n_solicitudes=self.cfg.solicitudes_eval,
+                semilla=self._semilla_eval,
+                con_trazado=True,
+            )
+        clasicas = [t for t in tareas if t not in TAREAS_DISPOSITIVO]
+        dispositivo = [t for t in tareas if t in TAREAS_DISPOSITIVO]
+        exito_estado: dict = {}
+        trazado_estado: dict = {}
+        for estado in ESTADOS_CONECTOR:
+            exito_e, trazado_e = evaluar(
+                self.cerebro,
+                clasicas,
+                n_solicitudes=self.cfg.solicitudes_eval,
+                semilla=self._semilla_eval,
+                con_trazado=True,
+                estado_conector=estado,
+            )
+            exito_estado[estado] = exito_e
+            trazado_estado[estado] = trazado_e
+        if dispositivo:
+            exito_d, trazado_d = evaluar(
+                self.cerebro,
+                dispositivo,
+                n_solicitudes=self.cfg.solicitudes_eval,
+                semilla=self._semilla_eval,
+                con_trazado=True,
+            )
+            exito_estado["dispositivo"] = exito_d
+            trazado_estado["dispositivo"] = trazado_d
+        self.detalle_eval_estado = exito_estado
+
+        # fusión honesta: por tarea, el PEOR estado manda (para el
+        # trazado, el mínimo entre los estados que dejaron datos)
+        def _minimo(por_estado: dict) -> dict:
+            valores: dict = {}
+            for fuente in por_estado.values():
+                for nombre, valor in fuente.items():
+                    valores.setdefault(nombre, []).append(valor)
+            return {nombre: min(lista) for nombre, lista in valores.items()}
+
+        return _minimo(exito_estado), _minimo(trazado_estado)
 
     def _etapa_con_almacenamiento(self) -> bool:
         """¿La etapa actual incluye tareas con I/O de almacenamiento?"""
@@ -674,6 +758,25 @@ class Incubadora:
                     )
                 self._log(linea_eval)
 
+                # v0.4.0, fix OOD: la vista de invarianza — el peor
+                # clásica de cada estado del conector. Si el mínimo
+                # global (exito_eval, ya fusionado) baja del umbral,
+                # la etapa no avanza hasta que la política resuelva
+                # IGUAL con el pendrive enchufado.
+                if self.detalle_eval_estado:
+                    empeor = {
+                        estado: min(fuente.values())
+                        for estado, fuente in self.detalle_eval_estado.items()
+                        if fuente
+                    }
+                    self._log(
+                        "  ↳ CONECTOR (peor clásica por estado): "
+                        + " | ".join(
+                            f"{estado} {empeor[estado]:.0%}"
+                            for estado in empeor
+                        )
+                    )
+
                 # mejor checkpoint global
                 if exito_medio > self.mejor_exito:
                     self.mejor_exito = exito_medio
@@ -686,6 +789,10 @@ class Incubadora:
                     "exito_entrenamiento": exito_ent,
                     "exito_eval": {k: round(v, 4) for k, v in exito_eval.items()},
                     "exito_medio_eval": round(exito_medio, 4),
+                    "exito_eval_estado": {
+                        estado: {k: round(v, 4) for k, v in fuente.items()}
+                        for estado, fuente in self.detalle_eval_estado.items()
+                    },
                     "trazado_eval": {
                         k: round(v, 4) for k, v in trazado_eval.items()
                     },
@@ -744,6 +851,10 @@ class Incubadora:
             "convergido": self.convergido,
             "exito_eval_final": {k: round(v, 4) for k, v in exito_final.items()},
             "exito_medio_final": round(exito_medio, 4),
+            "exito_eval_estado_final": {
+                estado: {k: round(v, 4) for k, v in fuente.items()}
+                for estado, fuente in self.detalle_eval_estado.items()
+            },
             "trazado_eval_final": {
                 k: round(v, 4) for k, v in trazado_final.items()
             },
